@@ -125,6 +125,13 @@ def _majority_vote(model_outputs: List[str]) -> tuple[str, float]:
 # === Metrics Computation ===
 
 
+def _get_batch_index(data_item):
+    non_tensor = data_item.non_tensor_batch
+    if "extra_info" in non_tensor and isinstance(non_tensor["extra_info"], dict):
+        return non_tensor["extra_info"].get("index", 0)
+    return non_tensor.get("index", 0)
+
+
 def compute_ttrl_metrics(batch, n):
     """
     Compute the TTRL metrics.
@@ -132,8 +139,7 @@ def compute_ttrl_metrics(batch, n):
     assert len(batch) % n == 0, "batch length must be divisible by n"
     num_prompts = len(batch) // n
 
-    # Sort the batch by the ID
-    idx = sorted(range(len(batch)), key=lambda x: batch[x].non_tensor_batch["extra_info"]["index"])
+    idx = sorted(range(len(batch)), key=lambda x: _get_batch_index(batch[x]))
 
     majority_reward = []
     gt_reward = []

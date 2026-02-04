@@ -606,7 +606,13 @@ def patch_valuehead_model(model) -> None:
 
 
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
-    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
+    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
+
+    # AutoModelForVision2Seq was added in transformers ~4.36; make it optional
+    try:
+        from transformers import AutoModelForVision2Seq
+    except ImportError:
+        AutoModelForVision2Seq = None
 
     try:
         model = AutoModelForTokenClassification.from_pretrained(
@@ -627,7 +633,8 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
     from trl import AutoModelForCausalLMWithValueHead
 
-    if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
+    # Use AutoModelForVision2Seq if available and model_config matches a vision model
+    if AutoModelForVision2Seq is not None and type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM

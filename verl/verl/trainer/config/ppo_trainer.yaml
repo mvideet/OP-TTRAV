@@ -76,6 +76,24 @@ data:
   # The field in the multi-modal dataset where the video is located.
   video_key: videos
 
+  # The field in the dataset containing video file paths (for OmniVideo format).
+  video_file_key: video_file
+
+  # The field in the dataset containing the question text.
+  question_key: question
+
+  # The field in the dataset containing the ground truth answer.
+  answer_key: answer
+
+  # Whether to use Qwen3-Omni model with audio-visual processing.
+  use_qwen3_omni: False
+
+  # Whether to use Qwen2.5-Omni model with audio-visual processing.
+  use_qwen2_5_omni: False
+
+  # Whether to extract and use audio from video files (for Qwen3-Omni / Qwen2.5-Omni).
+  use_audio_in_video: True
+
   # If the remote tokenizer has a Python file, this flag determines whether to allow using it.
   trust_remote_code: False
 

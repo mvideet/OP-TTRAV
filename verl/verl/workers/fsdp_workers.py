@@ -221,7 +221,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        # AutoModelForVision2Seq was added in transformers ~4.36; make it optional
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            AutoModelForVision2Seq = None
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -270,23 +276,66 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
+        # Some remote-code configs (e.g., Qwen2.5-Omni) may not define tie_word_embeddings.
+        # Default to True (standard HF behavior) when missing.
+        tie_word_embeddings = getattr(actor_model_config, "tie_word_embeddings", True)
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh
         )
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
-                actor_module_class = AutoModelForVision2Seq
+            # Handle multimodal models (e.g., Qwen2.5-Omni, Qwen3-Omni) that require specific model classes
+            model_type = getattr(actor_model_config, "model_type", "")
+            if model_type == "qwen2_5_omni":
+                from transformers import Qwen2_5OmniForConditionalGeneration
+                # Disable audio output (talker module) for RL training - we only need text generation
+                actor_model_config.enable_audio_output = False
+                full_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+                full_model.disable_talker()
+                # Use the thinker model (Qwen2_5OmniThinkerForCausalLM) for RL training
+                # The outer Qwen2_5OmniForConditionalGeneration doesn't have a standard forward method
+                # The thinker is a standard causal LM with both forward() and generate()
+                actor_module = full_model.thinker
+                actor_module._no_split_modules = ["Qwen2_5OmniDecoderLayer"]
+            elif model_type == "qwen3_omni":
+                from transformers import Qwen3OmniForConditionalGeneration
+                # Disable audio output (talker module) for RL training - we only need text generation
+                if hasattr(actor_model_config, "enable_audio_output"):
+                    actor_model_config.enable_audio_output = False
+                full_model = Qwen3OmniForConditionalGeneration.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+                if hasattr(full_model, 'disable_talker'):
+                    full_model.disable_talker()
+                # Use the thinker model for RL training (similar to Qwen2.5-Omni)
+                # The thinker is a standard causal LM with both forward() and generate()
+                actor_module = full_model.thinker if hasattr(full_model, 'thinker') else full_model
+                if hasattr(actor_module, '_no_split_modules') or True:
+                    actor_module._no_split_modules = getattr(actor_module, '_no_split_modules', None) or ["Qwen3OmniDecoderLayer"]
+            # Use AutoModelForVision2Seq if available and model_config matches a vision model
+            elif AutoModelForVision2Seq is not None and type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
+                actor_module = AutoModelForVision2Seq.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
             else:
-                actor_module_class = AutoModelForCausalLM
-
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                trust_remote_code=trust_remote_code,
-            )
+                actor_module = AutoModelForCausalLM.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -353,7 +402,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
-            auto_wrap_policy = None
+            # Skip this workaround for Qwen2.5-Omni/Qwen3-Omni models as they require FSDP sharding to fit in memory
+            if model_type not in ["qwen2_5_omni", "qwen3_omni"]:
+                auto_wrap_policy = None
 
         if self.rank == 0:
             print(f"wrap_policy: {auto_wrap_policy}")
@@ -472,10 +523,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
 
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
-
         elif rollout_name == "vllm":
             from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
@@ -722,6 +772,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         assert self._is_rollout
 
+        # For HF rollout with param_offload, we need to load params to GPU before generation
+        # (vLLM/SGLang have proper sharding managers that handle this, but HF rollout uses BaseShardingManager)
+        if self._is_offload_param and self.config.rollout.name == "hf":
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id
             if self.generation_config is not None
@@ -738,7 +793,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             with simple_timer("generate_sequences", timing_generate):
                 if "kwargs" in prompts.meta_info:
-                    kwargs = prompts.meta_info["kwargs"]
+                    kwargs = prompts.meta_info["kwargs"].copy()
+                    if self.config.rollout.name == "hf" and "n" in kwargs:
+                        kwargs.pop("n")
                     output = self.rollout.generate_sequences(prompts=prompts, **kwargs)
                 else:
                     output = self.rollout.generate_sequences(prompts=prompts)
@@ -746,12 +803,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             output = self.rollout_sharding_manager.postprocess_data(output)
 
-        timing_generate.update(self.rollout_sharding_manager.timing)
+        # Only update timing if the sharding manager has timing info
+        if hasattr(self.rollout_sharding_manager, 'timing') and self.rollout_sharding_manager.timing:
+            timing_generate.update(self.rollout_sharding_manager.timing)
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
         timing_generate = reduce_timing(timing_generate)
         output.meta_info["timing"] = timing_generate
         output = output.to("cpu")
+
+        # For HF rollout with param_offload, offload params back to CPU after generation
+        if self._is_offload_param and self.config.rollout.name == "hf":
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
         # clear kv cache
         get_torch_device().empty_cache()
@@ -1023,8 +1086,11 @@ class CriticWorker(Worker, DistProfilerExtension):
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
             critic_model_config.text_config.topk_method = "greedy"
 
+        # Some remote-code configs (e.g., Qwen2.5-Omni) may not define tie_word_embeddings.
+        # Default to True (standard HF behavior) when missing.
+        tie_word_embeddings = getattr(critic_model_config, "tie_word_embeddings", True)
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not critic_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh
         )
 
         with init_context(), warnings.catch_warnings():
@@ -1365,8 +1431,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         model_config.num_labels = 1
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
+        # Some remote-code configs (e.g., Qwen2.5-Omni) may not define tie_word_embeddings.
+        tie_word_embeddings = getattr(model_config, "tie_word_embeddings", True)
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh
         )
 
         with init_context(), warnings.catch_warnings():

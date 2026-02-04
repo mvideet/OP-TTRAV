@@ -176,6 +176,18 @@ def patch_forward_with_backends(
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type in ["qwen3_omni_moe", "qwen3_omni", "qwen3omni"]:
+        from verl.models.transformers.qwen3_omni import forward_with_torch_backend, forward_with_triton_backend
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type in ["qwen2_5_omni", "qwen2_5_omni_thinker"]:
+        # Use custom Qwen2.5-Omni implementation that handles multimodal inputs
+        # Handles both the full model and the thinker model (which we use for RL training)
+        from verl.models.transformers.qwen2_5_omni import forward_with_torch_backend, forward_with_triton_backend
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
     else:
         from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
 
@@ -212,10 +224,33 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
-        num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
-        )
+        # Try text_config (common for VLMs) 
+        if hasattr(model.config, "text_config") and hasattr(model.config.text_config, "num_attention_heads"):
+            num_attention_heads, num_key_value_heads = (
+                model.config.text_config.num_attention_heads,
+                model.config.text_config.num_key_value_heads,
+            )
+        # Try thinker_config.text_config (Qwen2.5-Omni structure)
+        elif hasattr(model.config, "thinker_config"):
+            thinker_cfg = model.config.thinker_config
+            if hasattr(thinker_cfg, "text_config") and hasattr(thinker_cfg.text_config, "num_attention_heads"):
+                num_attention_heads, num_key_value_heads = (
+                    thinker_cfg.text_config.num_attention_heads,
+                    thinker_cfg.text_config.num_key_value_heads,
+                )
+            elif hasattr(thinker_cfg, "num_attention_heads"):
+                num_attention_heads, num_key_value_heads = (
+                    thinker_cfg.num_attention_heads,
+                    thinker_cfg.num_key_value_heads,
+                )
+            else:
+                raise AttributeError(
+                    f"Cannot find num_attention_heads in thinker_config. Model type: {model.config.model_type}"
+                )
+        else:
+            raise AttributeError(
+                f"Cannot find num_attention_heads in config. Model type: {model.config.model_type}"
+            )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
         f"num_attention_heads {num_attention_heads} must be divisible by ulysses_sp_size {ulysses_sp_size}"

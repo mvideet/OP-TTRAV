@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Compiled extensions
+*.so
+*.o
+*.a
+*.cuo
+
+# CUDA / Torch extensions
+torch_extensions/
+.cache/
+nvcc_tmp/
+
+# FlashAttention / Triton
+flash_attn.egg-info/
+triton/
+.triton/
+*.ptx
+*.cubin
+
+# Logs / outputs
+*.out
+*.err
+wandb/
+outputs/
+slurm/err/*
+slurm/out/*
+
+# Figures / generated assets
+*.png
+figs/

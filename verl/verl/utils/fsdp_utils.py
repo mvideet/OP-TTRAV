@@ -187,6 +187,8 @@ def load_fsdp_model_to_gpu(model: FSDP):
         handle.flat_param_to(torch.device(f"{get_device_name()}:{device_id}"), non_blocking=True)
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
+    # Synchronize to ensure all async CPU->GPU copies are complete before model is used
+    get_torch_device().synchronize()
 
 
 @torch.no_grad()
@@ -194,6 +196,8 @@ def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
     for param in model.parameters():
         param.data = param.data.to(device, non_blocking=True)
+    # Synchronize to ensure all async CPU->GPU copies are complete before model is used
+    get_torch_device().synchronize() #
 
 
 @torch.no_grad()

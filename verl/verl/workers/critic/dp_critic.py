@@ -73,6 +73,11 @@ class DataParallelPPOCritic(BasePPOCritic):
                 position_ids = position_ids.transpose(0, 1)
 
             if self.use_remove_padding:
+                if unpad_input is None or pad_input is None or rearrange is None or index_first_axis is None:
+                    raise ModuleNotFoundError(
+                        "flash_attn is required when critic.model.use_remove_padding=True on CUDA. "
+                        "Either install flash-attn, or set critic.model.use_remove_padding=False."
+                    )
                 input_ids_rmpad, indices, *_ = unpad_input(
                     input_ids.unsqueeze(-1), attention_mask
                 )  # input_ids_rmpad (total_nnz, ...)

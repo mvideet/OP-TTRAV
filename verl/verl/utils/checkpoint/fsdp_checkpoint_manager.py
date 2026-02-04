@@ -309,8 +309,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                     auto_model_cls = AutoModelForCausalLM
                 elif "ForConditionalGeneration" in model_config.architectures[0]:
-                    from transformers import AutoModelForVision2Seq
-
+                    try:
+                        from transformers import AutoModelForVision2Seq
+                    except ImportError:
+                        raise ImportError(
+                            "AutoModelForVision2Seq requires transformers >= 4.36. "
+                            "Please upgrade: pip install -U transformers"
+                        )
                     auto_model_cls = AutoModelForVision2Seq
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")

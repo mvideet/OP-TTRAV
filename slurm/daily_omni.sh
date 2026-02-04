@@ -1,0 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=daily_omni
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=180G
+#SBATCH --time=24:00:00
+#SBATCH --output=slurm/out/daily_omni_%j.out
+#SBATCH --error=slurm/err/daily_omni_%j.err
+
+# Ensure log dirs exist (some clusters do not create them)
+mkdir -p slurm/out slurm/err
+
+# Optional: reduce CUDA fragmentation (can help with OOM)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+
+source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
+conda activate verl310
+
+# Run from repo root so paths in the training script resolve (e.g. custom_reward_function.path)
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}" || exit 1
+
+bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni.sh

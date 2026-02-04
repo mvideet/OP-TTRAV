@@ -541,6 +541,7 @@ class RayPPOTrainer:
         """
         Creates the train and validation dataloaders.
         """
+        print("Heartbeat: starting dataset/dataloader creation", flush=True)
         # TODO: we have to make sure the batch size is divisible by the dp size
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 
@@ -692,6 +693,8 @@ class RayPPOTrainer:
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
             if "multi_modal_data" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
+            if "multi_modal_inputs" in test_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("multi_modal_inputs")
             if "raw_prompt" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
             if "tools_kwargs" in test_batch.non_tensor_batch:
@@ -712,7 +715,6 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
             size_divisor = (
@@ -729,8 +731,6 @@ class RayPPOTrainer:
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            print("validation generation end")
-
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
@@ -746,11 +746,9 @@ class RayPPOTrainer:
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
-            print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -1051,6 +1049,7 @@ class RayPPOTrainer:
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        print("Heartbeat: tracking initialized", flush=True)
 
         self.global_steps = 0
 
@@ -1106,6 +1105,8 @@ class RayPPOTrainer:
 
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
+                if "multi_modal_inputs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("multi_modal_inputs")
                 if "raw_prompt" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
                 if "tools_kwargs" in batch.non_tensor_batch:
@@ -1258,6 +1259,9 @@ class RayPPOTrainer:
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
+                        # This code retrieves the computed rewards (and any extra information) for the batch.
+                        # If `launch_reward_fn_async` is enabled in the config, it waits for the asynchronous
+                        # reward computation (`future_reward`) to finish and then stores the reward tensor in the batch.
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
@@ -1322,7 +1326,6 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            print(batch.batch.keys())
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()

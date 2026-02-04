@@ -35,20 +35,11 @@ def main(config):
 def run_ppo(config) -> None:
     # Check if Ray is not initialized
     if not ray.is_initialized():
-        # Initialize Ray with a local cluster configuration
-        # Set environment variables in the runtime environment to control tokenizer parallelism,
-        # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
-        # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
+        # Minimal Ray init for SLURM
         ray.init(
-            runtime_env={
-                "env_vars": {
-                    "TOKENIZERS_PARALLELISM": "true",
-                    "NCCL_DEBUG": "WARN",
-                    "VLLM_LOGGING_LEVEL": "WARN",
-                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
-                }
-            },
             num_cpus=config.ray_init.num_cpus,
+            include_dashboard=False,
+            ignore_reinit_error=True,
         )
 
     # Create a remote instance of the TaskRunner class, and
@@ -97,8 +88,21 @@ class TaskRunner:
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        # For Qwen3-Omni, we use Qwen3OmniMoeProcessor which handles audio+video+image
+        use_qwen3_omni = config.data.get("use_qwen3_omni", False)
+        use_qwen2_5_omni = config.data.get("use_qwen2_5_omni", False)
+        if use_qwen3_omni:
+            from transformers import Qwen3OmniMoeProcessor
+            processor = Qwen3OmniMoeProcessor.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+            print("Using Qwen3OmniMoeProcessor for audio-visual multimodal inputs")
+        elif use_qwen2_5_omni:
+            from transformers import Qwen2_5OmniProcessor
+            processor = Qwen2_5OmniProcessor.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+            print("Using Qwen2_5OmniProcessor for audio-visual multimodal inputs")
+        else:
+            processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         # Version validation for vllm.
         if config.actor_rollout_ref.rollout.name in ["vllm"]:
@@ -185,11 +189,15 @@ class TaskRunner:
         )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        from verl.utils.dataset.rl_dataset import collate_fn
+        # Select collate_fn based on dataset type
+        if use_qwen3_omni or use_qwen2_5_omni:
+            from verl.utils.dataset.rl_omni_dataset import collate_fn
+        else:
+            from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
@@ -214,7 +222,7 @@ class TaskRunner:
         trainer.fit()
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, use_qwen3_omni=False):
     """Create a dataset.
 
     Arguments:
@@ -222,6 +230,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         data_config: The data config.
         tokenizer (Tokenizer): The tokenizer.
         processor (Processor): The processor.
+        use_qwen3_omni (bool): Whether to use RLOMNIDataset for Qwen3-Omni.
 
     Returns:
         dataset (Dataset): The dataset.
@@ -229,6 +238,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     from torch.utils.data import Dataset
 
     from verl.utils.dataset.rl_dataset import RLHFDataset
+    from verl.utils.dataset.rl_omni_dataset import RLOMNIDataset
 
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
@@ -243,6 +253,9 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
                 f"The custom dataset class '{data_config.custom_cls.name}' from "
                 f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
             )
+    elif use_qwen3_omni:
+        # Use RLOMNIDataset for Qwen3-Omni multimodal training
+        dataset_cls = RLOMNIDataset
     else:
         # Use the default RLHFDataset class if no custom class is specified
         dataset_cls = RLHFDataset

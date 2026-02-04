@@ -18,6 +18,8 @@ from typing import Optional, Union
 import torch
 from PIL import Image
 from qwen_vl_utils import fetch_image, fetch_video
+# Note: For Qwen3-Omni multimodal processing, use qwen_omni_utils.process_mm_info 
+# directly in the dataset code. It handles audio extraction from video automatically.
 
 
 def process_image(image: Union[dict, Image.Image]) -> Image.Image:
@@ -74,8 +76,6 @@ def process_video(
     if not isinstance(video, dict) or "video" not in video:
         raise NotImplementedError(VIDEO_FORMAT_HELP)
     assert nframes is None or fps is None, "Can't use both `nframes` or `fps`"
-
-    # Shallow copy... since we might want to add some keys
     video = dict(video)
 
     contains_sampling_rules = "nframes" in video or "fps" in video
