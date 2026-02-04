@@ -18,15 +18,23 @@
 
 set -x
 
+# Resolve repo root (…/TTRL) from this script location
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
+
+# Make verl importable (package is under ${REPO_ROOT}/verl)
+export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
+
 # Ensure runtime/tmp dirs are writable before anything else
 unset ROCR_VISIBLE_DEVICES || true
 export ROCR_VISIBLE_DEVICES=
 
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/data/sls/scratch/mvideet/ray_files}"
+# Force a writable runtime dir (compute nodes often forbid /run/user/$UID)
+export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-export RAY_TMPDIR="${RAY_TMPDIR:-/data/sls/scratch/mvideet/ray_tmp/${SLURM_JOB_ID:-manual}}"
+export RAY_TMPDIR="/data/sls/scratch/mvideet/ray_tmp/${SLURM_JOB_ID:-manual}"
 mkdir -p "$RAY_TMPDIR"
 
 export HF_DATASETS_OFFLINE=0
@@ -34,12 +42,12 @@ export TRANSFORMERS_OFFLINE=0
 
 TASK="OmniVideo"
 BACKBONE="Qwen2.5-Omni-3B"
-MAX_RESPONSE_LENGTH=128   # Reduced from 256 to save memory (longer = more KV cache + activations)
+MAX_RESPONSE_LENGTH=64    # Reduce KV cache / activation size (OOM -> go smaller first)
 N=16                      # Total rollouts, used to be 128
 
 DATA_TRAIN_BATCH_SIZE=4    # Batch size per rollout (must be divisible by n_gpus_per_node)
-N_VOTES_PER_PROMPT=16      # Reduced from 32 to fit GPU memory (fewer sequences per generation)
-N_SAMPLES_PER_PROMPT=8     # Reduced from 16 (fewer samples for PPO = less memory in actor/critic)
+N_VOTES_PER_PROMPT=8       # Fewer sequences per prompt during rollout/voting
+N_SAMPLES_PER_PROMPT=4     # Fewer samples kept for PPO updates
 # PPO mini-batch size must be <= train_batch_size (validated in RayPPOTrainer)
 MINI_BATCH_SIZE=${DATA_TRAIN_BATCH_SIZE}
 MICRO_BATCH_SIZE=1         # Reduced from 2 to lower peak memory during log_prob and PPO steps
@@ -68,6 +76,7 @@ mkdir -p "${OUTPUT_DIR}"
 echo "Output directory: ${OUTPUT_DIR}"
 
 # Run training with VERL
+cd "${REPO_ROOT}" || exit 1
 python3 -m verl.trainer.main_ppo \
     --config-name='ppo_trainer_ttrl.yaml' \
     actor_rollout_ref.model.path=${BACKBONE_PATH} \
@@ -78,7 +87,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.use_remove_padding=False \
     data.train_files=${train_files_str} \
     data.val_files=${val_files_str} \
-    data.max_prompt_length=10000 \
+    data.max_prompt_length=6000 \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.train_batch_size=${DATA_TRAIN_BATCH_SIZE} \
     data.val_batch_size=${DATA_TRAIN_BATCH_SIZE} \

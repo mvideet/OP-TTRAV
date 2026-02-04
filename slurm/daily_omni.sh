@@ -1,13 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=daily_omni
+#SBATCH -J daily_omni
+#SBATCH -o slurm/out/daily_omni_%j.out
+#SBATCH -e slurm/err/daily_omni_%j.err
+#SBATCH --qos=regular
+#SBATCH --partition=a6
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
 #SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=180G
-#SBATCH --time=24:00:00
-#SBATCH --output=slurm/out/daily_omni_%j.out
-#SBATCH --error=slurm/err/daily_omni_%j.err
+#SBATCH --requeue
 
 # Ensure log dirs exist (some clusters do not create them)
 mkdir -p slurm/out slurm/err
