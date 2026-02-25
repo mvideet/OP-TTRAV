@@ -3,6 +3,27 @@
 unset VLLM_ATTENTION_BACKEND
 export VLLM_USE_V1=1
 
+# Math task: use ttrl_math extract_answer/grade (required for AIME)
+export TTRL_TASK_TYPE=math
+
+# Reduce CUDA fragmentation (recommended when seeing OOM during backward)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ------------------------------------------------------------
+# Resolve repo root (run from TTRL or verl/examples/ttrl/Qwen2.5-Math)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
+
+# Cluster: unset ROCR_VISIBLE_DEVICES (conflicts with CUDA); set writable runtime dirs
+unset ROCR_VISIBLE_DEVICES || true
+export ROCR_VISIBLE_DEVICES=
+export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export RAY_TMPDIR="/data/sls/scratch/mvideet/ray_tmp/${SLURM_JOB_ID:-manual}"
+mkdir -p "$RAY_TMPDIR"
+
 # ------------------------------------------------------------
 
 DATE=$(date +%m%d)
@@ -22,14 +43,14 @@ else
 fi
 
 EPISODE=80
-DATA_TRAIN_BATCH_SIZE=8
+DATA_TRAIN_BATCH_SIZE=4
 N_VOTES_PER_PROMPT=64
-N_SAMPLES_PER_PROMPT=32
+N_SAMPLES_PER_PROMPT=16
 MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=2
 
-DATA_LOCAL_DIR="path/to/TTRL/verl/data"
-BACKBONE_PATH="path/to/${BACKBONE}"
+DATA_LOCAL_DIR="${REPO_ROOT}/verl/data"
+BACKBONE_PATH="Qwen/Qwen2.5-Math-1.5B"
 
 MODEL="${TASK}-${BACKBONE}"
 EXPERIMENT="TTRL-Len@${K}k"
@@ -39,10 +60,11 @@ LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
 OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${DATE}/${EXPERIMENT}-${ADVANTAGE}-${TIME_TAG}"
 
 # ------------------------------------------------------------
+cd "${REPO_ROOT}" || exit 1
 python -m verl.trainer.main_ppo \
---config-name='ppo_trainer_ttrl.yaml'\
-  data.train_files=["$DATA_LOCAL_DIR/$TASK/train.parquet"] \
-  data.val_files=["$DATA_LOCAL_DIR/$TASK/test.parquet"] \
+  --config-name='ppo_trainer_ttrl.yaml' \
+  data.train_files=["$DATA_LOCAL_DIR/$TASK/train.json"] \
+  data.val_files=["$DATA_LOCAL_DIR/$TASK/test.json"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
   data.max_response_length=$MAX_RESPONSE_LENGTH \
   data.train_batch_size=$DATA_TRAIN_BATCH_SIZE \
@@ -51,6 +73,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.model.path=$BACKBONE_PATH \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.model.enable_activation_offload=False \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.actor.use_kl_loss=True \
@@ -68,7 +91,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
   actor_rollout_ref.rollout.val_kwargs.do_sample=True \
   actor_rollout_ref.rollout.val_kwargs.n=$N \
@@ -80,12 +103,13 @@ python -m verl.trainer.main_ppo \
   critic.model.use_remove_padding=True \
   critic.model.path=$BACKBONE_PATH \
   critic.model.enable_gradient_checkpointing=True \
+  critic.model.enable_activation_offload=False \
   critic.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   critic.model.fsdp_config.param_offload=False \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  custom_reward_function.path="./verl/utils/reward_score/ttrl_math/__init__.py" \
+  custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_math/__init__.py" \
   custom_reward_function.name=reward_func \
   ttrl.enable=True \
   ttrl.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
@@ -93,8 +117,8 @@ python -m verl.trainer.main_ppo \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
-  trainer.n_gpus_per_node=8 \
-  trainer.nnodes=1 \
+  trainer.n_gpus_per_node=${N_GPUS:-4} \
+  trainer.nnodes=${NNODES:-1} \
   trainer.save_freq=2000000 \
   trainer.test_freq=2 \
   trainer.max_actor_ckpt_to_keep=0 \

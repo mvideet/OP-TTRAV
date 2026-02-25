@@ -15,6 +15,7 @@
 import logging
 import os
 
+import torch
 import pkg_resources
 from packaging.version import parse as parse_version
 from pkg_resources import DistributionNotFound
@@ -31,6 +32,20 @@ with open(os.path.join(version_folder, "version/version")) as f:
 
 set_basic_config(level=logging.WARNING)
 
+# Compatibility: newer transformers/accelerate pass _is_hf_initialized into Parameter,
+# which torch.nn.Parameter.__new__ does not accept. Strip it so ref/actor loading does not fail.
+def _patch_parameter_for_hf():
+    _orig = torch.nn.Parameter.__new__
+
+    @staticmethod
+    def _parameter_new(cls, *args, **kwargs):
+        kwargs.pop("_is_hf_initialized", None)
+        return _orig(cls, *args, **kwargs)
+
+    torch.nn.Parameter.__new__ = _parameter_new
+
+
+_patch_parameter_for_hf()
 
 __all__ = ["DataProto", "__version__"]
 

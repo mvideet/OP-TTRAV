@@ -176,7 +176,14 @@ class TaskRunner:
             mapping[Role.RewardModel] = global_pool_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+        use_kl_in_reward = config.algorithm.use_kl_in_reward
+        use_kl_loss = config.actor_rollout_ref.actor.use_kl_loss
+        load_ref_policy = use_kl_in_reward or use_kl_loss
+        print(
+            f"[REF POLICY] use_kl_in_reward={use_kl_in_reward}, use_kl_loss={use_kl_loss} -> "
+            f"Reference policy will {'BE LOADED' if load_ref_policy else 'NOT be loaded'} (saves ~1x model memory)"
+        )
+        if load_ref_policy:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 

@@ -15,7 +15,8 @@ mkdir -p slurm/out slurm/err
 
 # Optional: reduce CUDA fragmentation (can help with OOM)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
+export TTRL_DEBUG=1
+export VAL_DEBUG=1
 
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
 conda activate verl310

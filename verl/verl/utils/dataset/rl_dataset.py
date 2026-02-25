@@ -100,6 +100,7 @@ class RLHFDataset(Dataset):
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "prompt")
+        self.answer_key = config.get("answer_key", "answer")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.max_prompt_length = config.get("max_prompt_length", 1024)
@@ -129,9 +130,12 @@ class RLHFDataset(Dataset):
 
     def _read_files_and_tokenize(self):
         dataframes = []
-        for parquet_file in self.data_files:
-            # read parquet files and cache
-            dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+        for data_file in self.data_files:
+            # Support both JSON and Parquet
+            if str(data_file).endswith(".json"):
+                dataframe = datasets.load_dataset("json", data_files=data_file)["train"]
+            else:
+                dataframe = datasets.load_dataset("parquet", data_files=data_file)["train"]
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
@@ -192,7 +196,12 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        raw_prompt = example.pop(self.prompt_key)
+        # Support both chat format [{"role":"user","content":"..."}] and plain string
+        if isinstance(raw_prompt, str):
+            messages = [{"role": "user", "content": raw_prompt}]
+        else:
+            messages = raw_prompt
 
         if self.image_key in example or self.video_key in example:
             for message in messages:
@@ -213,8 +222,12 @@ class RLHFDataset(Dataset):
         return messages
     
     def _add_suffix_to_entry(self, entry):
-        # Assuming 'text' is the field where the prompt should be added
-        entry[self.prompt_key][-1]["content"] = entry[self.prompt_key][-1]["content"] + self.suffix_prompt
+        val = entry[self.prompt_key]
+        if isinstance(val, str):
+            entry[self.prompt_key] = val + self.suffix_prompt
+        else:
+            # Chat format: list of {"role": ..., "content": ...}
+            entry[self.prompt_key][-1]["content"] = entry[self.prompt_key][-1]["content"] + self.suffix_prompt
         return entry
     
     def __getitem__(self, item):
@@ -312,6 +325,18 @@ class RLHFDataset(Dataset):
                 raise RuntimeError(f"Prompt length {len(raw_prompt_ids)} is longer than {self.max_prompt_length}.")
 
         row_dict["raw_prompt_ids"] = raw_prompt_ids
+
+        # Set reward_model from answer_key if not already present (AIME/GSM8K format)
+        if "reward_model" not in row_dict and self.answer_key in row_dict:
+            gt = row_dict.get(self.answer_key)
+            row_dict["reward_model"] = {
+                "style": "rule",
+                "ground_truth": [gt] if not isinstance(gt, list) else gt,
+            }
+        # Set data_source from source if not already present
+        if "data_source" not in row_dict and "source" in row_dict:
+            row_dict["data_source"] = row_dict["source"]
+
         # encode prompts without chat template
         if self.return_raw_chat:
             row_dict["raw_prompt"] = messages

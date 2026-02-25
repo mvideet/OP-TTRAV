@@ -340,6 +340,10 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        print(
+            f"[REF POLICY] use_reference_policy={self.use_reference_policy} "
+            f"(Role.RefPolicy in mapping: {Role.RefPolicy in role_worker_mapping})"
+        )
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
@@ -662,6 +666,12 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
+        VAL_DEBUG = os.environ.get("VAL_DEBUG", "0") == "1"
+        
+        if VAL_DEBUG:
+            print(f"\n[VAL DEBUG] Starting validation with {len(self.val_dataloader)} batches")
+            print(f"[VAL DEBUG] val_kwargs.n = {self.config.actor_rollout_ref.rollout.val_kwargs.n}")
+        
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -671,7 +681,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
-        for test_data in self.val_dataloader:
+        for batch_idx, test_data in enumerate(self.val_dataloader):
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -749,6 +759,9 @@ class RayPPOTrainer:
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
+            
+            if VAL_DEBUG:
+                print(f"\n[VAL DEBUG] Batch {batch_idx}: {len(scores)} samples")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -797,6 +810,39 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        if VAL_DEBUG:
+            n_per_prompt = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            preds = reward_extra_infos_dict.get("pred", [None] * len(sample_scores))
+            if len(preds) != len(sample_scores):
+                preds = [None] * len(sample_scores)
+            num_prompts = len(sample_inputs) // n_per_prompt
+            print(f"\n[VAL DEBUG] Printing every question and every rollout (n={n_per_prompt} per question, {num_prompts} questions)")
+            print("=" * 80)
+            for p in range(num_prompts):
+                start = p * n_per_prompt
+                question = sample_inputs[start]
+                print(f"\n--- Question {p + 1}/{num_prompts} ---")
+                print(f"[QUESTION]\n{question}")
+                print(f"[ROLLOUTS]")
+                for j in range(n_per_prompt):
+                    idx = start + j
+                    sc = sample_scores[idx]
+                    pred = preds[idx] if idx < len(preds) else None
+                    out = sample_outputs[idx]
+                    print(f"  --- Rollout {j + 1}/{n_per_prompt} (score={sc}) (pred={repr(pred)}) ---")
+                    print(out)
+                    print()
+            print("=" * 80)
+            print(f"\n[VAL DEBUG] Validation complete!")
+            print(f"  Total samples: {len(sample_scores)}")
+            print(f"  Overall mean score: {sum(sample_scores)/len(sample_scores):.3f}")
+            # Print core metrics
+            core_metrics = {k: v for k, v in metric_dict.items() if "val-core" in k}
+            if core_metrics:
+                print(f"  Core metrics:")
+                for k, v in sorted(core_metrics.items()):
+                    print(f"    {k}: {v:.4f}")
 
         return metric_dict
 
@@ -878,8 +924,14 @@ class RayPPOTrainer:
             self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
+            print("[REF POLICY] Initializing reference policy worker (loading full model copy)...")
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
+            print("[REF POLICY] Reference policy loaded.")
+        elif not self.use_reference_policy:
+            print("[REF POLICY] No reference policy worker (saves ~1x model memory).")
+        else:
+            print("[REF POLICY] Ref colocated in actor (LoRA mode), no separate ref worker.")
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
@@ -1177,10 +1229,14 @@ class RayPPOTrainer:
                         batch.non_tensor_batch["uid"] = np.array(
                             [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                         )
-                        # repeat to align with repeated responses in rollout
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        if self.config.get("ttrl", {}).get("enable", False):
+                            repeat_times = self.config.ttrl.n_samples_per_prompt
+                        batch = batch.repeat(repeat_times=repeat_times, interleave=True)
 
                     batch = batch.union(gen_batch_output)
+                    if self.config.get("ttrl", {}).get("enable", False):
+                        n_per_prompt = self.config.ttrl.n_samples_per_prompt
+                        batch.non_tensor_batch["index"] = np.arange(len(batch), dtype=np.int64) // n_per_prompt
 
                     if "response_mask" not in batch.batch:
                         batch.batch["response_mask"] = compute_response_mask(batch)
