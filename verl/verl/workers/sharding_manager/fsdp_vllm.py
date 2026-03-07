@@ -44,7 +44,13 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import check_exclude_modules, check_target_modules, convert_weight_keys
 from verl.utils.torch_functional import check_device_is_available
-from verl.utils.vllm_utils import TensorLoRARequest, VLLMHijack, is_version_ge, patch_vllm_moe_model_weight_loader
+from verl.utils.vllm_utils import (
+    TensorLoRARequest,
+    VLLMHijack,
+    get_model_runner_from_engine,
+    is_version_ge,
+    patch_vllm_moe_model_weight_loader,
+)
 
 from .base import BaseShardingManager
 
@@ -72,11 +78,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         # self.model_runner = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner if
         # inference_engine else None
 
-        self.model_runner = (
-            self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner
-            if self.inference_engine
-            else None
-        )
+        self.model_runner = get_model_runner_from_engine(self.inference_engine)
 
         self.model_config = model_config
         self.rollout_config = rollout_config
@@ -264,6 +266,27 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
     def update_params(self, updated_params, peft_config=None):
         model = self.model_runner.model
+        # Qwen2.5-Omni thinker uses an HF->vLLM mapper that expects HF-style
+        # keys rooted at "thinker.*". FSDP can emit keys like "model.*",
+        # "lm_head.*", or wrapped "_fsdp_wrapped_module.*". Normalize them to
+        # "thinker.*" so vLLM's mapper can translate them reliably.
+        if model.__class__.__name__ == "Qwen2_5OmniThinkerForConditionalGeneration":
+            normalized_params = {}
+            for k, v in updated_params.items():
+                nk = k
+                if nk.startswith("_fsdp_wrapped_module."):
+                    nk = nk[len("_fsdp_wrapped_module.") :]
+
+                if nk.startswith("model."):
+                    nk = f"thinker.model.{nk[len('model.'):]}"
+                elif nk.startswith("lm_head."):
+                    nk = f"thinker.lm_head.{nk[len('lm_head.'):]}"
+                elif not nk.startswith("thinker."):
+                    nk = f"thinker.{nk}"
+
+                normalized_params[nk] = v
+            updated_params = normalized_params
+
         if peft_config:
             if self.base_sync_done:
                 lora_int_id = int(time.time_ns() % 0x7FFFFFFF)

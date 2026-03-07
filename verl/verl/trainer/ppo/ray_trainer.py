@@ -681,7 +681,10 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
+        val_max_batches = self.config.data.get("val_max_batches")
         for batch_idx, test_data in enumerate(self.val_dataloader):
+            if val_max_batches is not None and batch_idx >= val_max_batches:
+                break
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -718,8 +721,19 @@ class RayPPOTrainer:
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
 
+            eos_token_id = self.tokenizer.eos_token_id
+            if eos_token_id is None and self.tokenizer.eos_token is not None:
+                eos_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.eos_token)
+            if eos_token_id is None:
+                # Fallback for Qwen chat models (e.g. Qwen2.5-Omni) where eos_token_id may be unset
+                eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            if eos_token_id is None or (isinstance(eos_token_id, list) and len(eos_token_id) == 0):
+                raise ValueError(
+                    "eos_token_id is None or empty. Required for get_response_mask. "
+                    "Ensure tokenizer has eos_token/eos_token_id set."
+                )
             test_gen_batch.meta_info = {
-                "eos_token_id": self.tokenizer.eos_token_id,
+                "eos_token_id": eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
                 "recompute_log_prob": False,
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
@@ -1171,6 +1185,15 @@ class RayPPOTrainer:
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
+
+                # Log max/mean/min prompt length once (first batch) for debugging / sanity check
+                if self.global_steps == 0 and "attention_mask" in gen_batch.batch:
+                    am = gen_batch.batch["attention_mask"]
+                    prompt_lengths = am.sum(dim=1).float().cpu().numpy()
+                    if prompt_lengths.size > 0:
+                        print(
+                            f"[prompt length] max={prompt_lengths.max():.0f} mean={prompt_lengths.mean():.1f} min={prompt_lengths.min():.0f} (batch_size={len(prompt_lengths)})"
+                        )
 
                 if repeat_sampling_sglang_grpo:
                     uids_for_prompts = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)

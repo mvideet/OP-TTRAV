@@ -44,7 +44,14 @@ class HFRollout(BaseRollout):
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
-        num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
+        micro_batch_size = self.config.get("micro_batch_size")
+        if micro_batch_size is None or batch_size <= micro_batch_size:
+            num_chunks = 1
+        else:
+            num_chunks = batch_size // micro_batch_size
+            # DataProto.chunk requires len % chunks == 0; fall back to no chunking if not divisible
+            if batch_size % num_chunks != 0:
+                num_chunks = 1
         batch_prompts = prompts.chunk(chunks=num_chunks)
         output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)
@@ -145,6 +152,8 @@ class HFRollout(BaseRollout):
         if hasattr(model_to_check, 'disable_talker'):
             model_to_check.disable_talker()
         
+        num_return_sequences = kwargs.pop("num_return_sequences", 1)
+
         with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             # Build generate kwargs
             generate_kwargs = dict(
@@ -169,10 +178,37 @@ class HFRollout(BaseRollout):
             if hasattr(model_to_check, 'talker') or 'OmniForConditionalGeneration' in model_class_name:
                 generate_kwargs["return_audio"] = False
             
-            output = self.module.generate(**generate_kwargs)
+            if num_return_sequences > 1:
+                # Avoid full (n * seq_len * vocab) prefill by generating in small batches.
+                # num_return_sequences_batch_size (default 3) trades memory vs GPU utilization.
+                chunk_size = min(
+                    num_return_sequences,
+                    self.config.get("num_return_sequences_batch_size", 3),
+                )
+                generate_kwargs["num_return_sequences"] = chunk_size
+                target_len = prompt_length + response_length
+                all_sequences = []
+                remaining = num_return_sequences
+                while remaining > 0:
+                    current_batch = min(chunk_size, remaining)
+                    generate_kwargs["num_return_sequences"] = current_batch
+                    out = self.module.generate(**generate_kwargs)
+                    s = out.sequences
+                    if s.shape[1] < target_len:
+                        pad = torch.full(
+                            (s.shape[0], target_len - s.shape[1]),
+                            pad_token_id, device=s.device, dtype=s.dtype,
+                        )
+                        s = torch.cat([s, pad], dim=1)
+                    elif s.shape[1] > target_len:
+                        s = s[:, :target_len]
+                    all_sequences.append(s)
+                    remaining -= current_batch
+                seq = torch.cat(all_sequences, dim=0)
+            else:
+                output = self.module.generate(**generate_kwargs)
+                seq = output.sequences
 
-        # TODO: filter out the seq with no answers like ds-chat
-        seq = output.sequences
         generated_batch_size = seq.size(0)  # bs * num_return_sequences
 
         # huggingface generate will stop generating when all the batch reaches [EOS].
@@ -190,8 +226,6 @@ class HFRollout(BaseRollout):
             seq = seq[:, :sequence_length]
         assert seq.shape[1] == sequence_length, f"seq.shape[1]={seq.shape[1]} != sequence_length={sequence_length}"
 
-        # make necessary reputations if num_return_sequences > 1
-        num_return_sequences = kwargs.get("num_return_sequences", 1)
         if num_return_sequences > 1:
             position_ids = position_ids.repeat_interleave(num_return_sequences, dim=0)
             attention_mask = attention_mask.repeat_interleave(num_return_sequences, dim=0)
@@ -203,7 +237,12 @@ class HFRollout(BaseRollout):
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).repeat(generated_batch_size, 1)
 
-        response_position_ids = position_ids[:, -1:] + delta_position_id
+        if position_ids.dim() == 3:
+            # mrope position_ids: (batch, 3, seq_len) — e.g. Qwen2.5-Omni
+            # slice the last position along seq_len dim, then broadcast over response
+            response_position_ids = position_ids[:, :, -1:] + delta_position_id.unsqueeze(1)
+        else:
+            response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
         response_attention_mask = get_response_mask(

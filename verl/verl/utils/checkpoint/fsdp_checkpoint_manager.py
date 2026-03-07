@@ -265,7 +265,21 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if unwrap_model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
                 # Some model's name_or_path is empty if not initialized from pretrained,
                 # in this cases, we don't save generation config.
-                generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
+                path_to_try = model_config.name_or_path
+                # Qwen2.5-Omni thinker has name_or_path like "X/thinker"; generation_config.json is in parent.
+                if path_to_try.endswith("/thinker"):
+                    path_to_try = path_to_try[: -len("/thinker")]
+                try:
+                    generation_config = GenerationConfig.from_pretrained(
+                        path_to_try, local_files_only=True, token=None
+                    )
+                except (OSError, Exception):
+                    try:
+                        generation_config = GenerationConfig.from_pretrained(
+                            path_to_try, local_files_only=False, token=None
+                        )
+                    except (OSError, Exception):
+                        generation_config = GenerationConfig.from_model_config(model_config)
                 generation_config.save_pretrained(hf_config_tokenizer_path)
             else:
                 generation_config = None

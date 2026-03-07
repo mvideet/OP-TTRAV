@@ -485,6 +485,9 @@ actor_rollout_ref:
     # number of responses (i.e. num sample times). > 1 for grpo
     n: 1
 
+    # HF rollout: number of prompts per forward call (controls memory during generation)
+    micro_batch_size: null
+
     # Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)
     multi_stage_wake_up: false
 

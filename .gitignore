@@ -35,6 +35,12 @@ outputs/
 slurm/err/*
 slurm/out/*
 
+# Training checkpoints (large, should not be tracked)
+checkpoints/
+sft_checkpoints/
+
+.cursor/
+
 # Figures / generated assets
 *.png
 figs/

@@ -274,6 +274,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
+            try:
+                import flash_attn
+                from flash_attn import flash_attn_func
+                print("FlashAttention 2: available (attn_implementation=flash_attention_2 will use it)")
+            except Exception as e:
+                print(f"FlashAttention 2: not available ({e}); attention will fall back to SDPA/eager")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         # Some remote-code configs (e.g., Qwen2.5-Omni) may not define tie_word_embeddings.
@@ -777,10 +783,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param and self.config.rollout.name == "hf":
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id
+        eos_token_id = (
+            self.generation_config.eos_token_id
             if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
+            else self.tokenizer.eos_token_id
+        )
+        if eos_token_id is None and self.tokenizer.eos_token is not None:
+            eos_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.eos_token)
+        if eos_token_id is None:
+            eos_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        if eos_token_id is None or (isinstance(eos_token_id, list) and len(eos_token_id) == 0):
+            raise ValueError(
+                "eos_token_id is None or empty. Required for get_response_mask. "
+                "Ensure tokenizer has eos_token/eos_token_id set."
+            )
+        meta_info = {
+            "eos_token_id": eos_token_id,
             "pad_token_id": self.generation_config.pad_token_id
             if self.generation_config is not None
             else self.tokenizer.pad_token_id,

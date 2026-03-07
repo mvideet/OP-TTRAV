@@ -222,6 +222,7 @@ def masked_whiten(values, mask, shift_mean=True):
 def get_response_mask(response_id: torch.Tensor, eos_token: Union[int, List[int]] = 2, dtype=torch.int64):
     """
     end of sentence token can be int or list: 1 or [1, 2]
+    eos_token must not be None (causes RuntimeError in torch.tensor).
     e.g.
     response_id = torch.tensor([[20, 10, 34, 1, 0, 0, 0],
                                 [78, 0, 76, 2, 1, 0, 0],
@@ -238,6 +239,11 @@ def get_response_mask(response_id: torch.Tensor, eos_token: Union[int, List[int]
                             [1, 1, 1, 0, 0, 0, 0],
                             [1, 1, 1, 1, 1, 0, 0]])
     """
+    if eos_token is None:
+        raise ValueError(
+            "eos_token cannot be None for get_response_mask. "
+            "Ensure tokenizer.eos_token_id (or eos_token from tokenizer.eos_token) is set in meta_info."
+        )
     eos_mask = torch.isin(response_id, torch.tensor(eos_token, device=response_id.device)).int()
     return (eos_mask.cumsum(dim=1) - eos_mask).eq(0).to(dtype)
 

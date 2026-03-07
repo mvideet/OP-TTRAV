@@ -22,6 +22,45 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
+import numpy as np
+
+
+def _to_native_scalar(v: Any) -> Any:
+    """Convert numpy/tensor scalars to native Python for wandb JSON serialization."""
+    if isinstance(v, (np.floating, np.integer)):
+        return float(v) if isinstance(v, np.floating) else int(v)
+    if isinstance(v, (np.bool_, bool)):
+        return bool(v)
+    if hasattr(v, "item") and getattr(v, "numel", lambda: 1)() == 1:
+        return v.item()
+    return v
+
+
+class _WandBLogAdapter:
+    """Adapter that converts metric values to native Python before wandb.log (fixes numpy/tensor serialization)."""
+
+    def __init__(self, wandb_module):
+        self._wandb = wandb_module
+
+    def log(self, data, step):
+        if not data:
+            return
+        # Convert scalars to native Python so wandb can serialize (numpy.float64/tensor -> float)
+        safe_data = {}
+        for k, v in data.items():
+            try:
+                out = _to_native_scalar(v)
+                if isinstance(out, (int, float, bool, str)) or out is None:
+                    safe_data[k] = out
+            except (TypeError, ValueError, AttributeError):
+                if isinstance(v, (int, float, bool, str)) or v is None:
+                    safe_data[k] = v
+        if safe_data:
+            self._wandb.log(safe_data, step=step)
+
+    def finish(self, exit_code=0):
+        self._wandb.finish(exit_code=exit_code)
+
 
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
@@ -53,10 +92,14 @@ class Tracking:
             import wandb
 
             settings = None
-            if config and config["trainer"].get("wandb_proxy", None):
+            if config and config.get("trainer", {}).get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
-            self.logger["wandb"] = wandb
+            run = wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
+            self.logger["wandb"] = _WandBLogAdapter(wandb)
+            # Log wandb status so user knows if offline/disabled (common on clusters without WANDB_API_KEY)
+            if run is not None:
+                mode = "offline" if getattr(run, "offline", False) else ("disabled" if run.disabled else "online")
+                print(f"W&B initialized: mode={mode}, project={project_name}, run={experiment_name}", flush=True)
 
         if "mlflow" in default_backend:
             import os

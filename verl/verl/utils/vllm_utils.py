@@ -17,7 +17,10 @@ from typing import List
 
 from msgspec import field
 from packaging import version as vs
-from vllm.lora.models import LoRAModel
+try:
+    from vllm.lora.lora_model import LoRAModel
+except ImportError:
+    from vllm.lora.models import LoRAModel  # vLLM < 0.16
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -203,3 +206,32 @@ class VLLMHijack:
 def is_version_ge(pkg: str = "vllm", minver: str = "0.7.3"):
     """check if the package version is greater than or equal to the minimum version"""
     return vs.parse(get_version(pkg)) >= vs.parse(minver)
+
+
+def get_model_runner_from_engine(inference_engine):
+    """Get model_runner from vLLM inference engine. Handles vLLM 0.8.x and 0.16+ structure."""
+    if inference_engine is None:
+        return None
+    # vLLM 0.8.x path: llm_engine.model_executor.driver_worker.worker.model_runner
+    try:
+        me = inference_engine.llm_engine.model_executor
+        if hasattr(me, "driver_worker") and hasattr(me.driver_worker, "worker"):
+            return me.driver_worker.worker.model_runner
+    except AttributeError:
+        pass
+    # vLLM 0.16+ V1 engine: model_executor may be under engine_core
+    try:
+        llm_engine = inference_engine.llm_engine
+        if hasattr(llm_engine, "engine_core") and hasattr(llm_engine.engine_core, "engine_core"):
+            ec = llm_engine.engine_core.engine_core
+            if hasattr(ec, "model_executor"):
+                me = ec.model_executor
+                if hasattr(me, "driver_worker") and hasattr(me.driver_worker, "worker"):
+                    return me.driver_worker.worker.model_runner
+    except AttributeError:
+        pass
+    raise AttributeError(
+        "Could not find model_runner in vLLM engine. "
+        "Structure may have changed in this vLLM version. "
+        "Please open an issue at https://github.com/volcengine/verl"
+    )

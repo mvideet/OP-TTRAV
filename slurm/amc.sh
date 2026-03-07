@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J aime_ttrl
-#SBATCH -o slurm/out/aime_ttrl_%j.out
-#SBATCH -e slurm/err/aime_ttrl_%j.err
+#SBATCH -J amc_ttrl
+#SBATCH -o slurm/out/amc_ttrl_%j.out
+#SBATCH -e slurm/err/amc_ttrl_%j.err
 #SBATCH --qos=regular
 #SBATCH --partition=a6
 #SBATCH --nodes=1
@@ -18,7 +18,7 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_BACKEND_LOG_LEVEL=debug
 
-# Math task: use ttrl_math extract_answer/grade (required for AIME)
+# Math task: use ttrl_math extract_answer/grade (required for AMC)
 export TTRL_TASK_TYPE=math
 export VAL_DEBUG=1
 
@@ -32,10 +32,10 @@ export VLLM_USE_V1=1
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
 conda activate verl310
 
-# Repo root: from script path; fallback to submit dir when script has no path (e.g. "aime.sh")
+# Repo root: from script path; fallback to submit dir when script has no path (e.g. "amc.sh")
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-# If script was run as "aime.sh" from TTRL, SCRIPT_DIR=TTRL and REPO_ROOT would be wrong; fix it
+# If script was run as "amc.sh" from TTRL, SCRIPT_DIR=TTRL and REPO_ROOT would be wrong; fix it
 if [[ ! -d "${REPO_ROOT}/verl/verl" && -n "${SLURM_SUBMIT_DIR}" && -d "${SLURM_SUBMIT_DIR}/verl/verl" ]]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
 fi
@@ -59,11 +59,11 @@ export N_GPUS=4
 export NNODES=1
 
 # ------------------------------------------------------------
-# Training config: Qwen2.5 (not Qwen2.5-Math) with AIME TTRL + enhancements from Qwen2.5-Math
+# Training config: Qwen2.5 with AMC TTRL (same setup as slurm/aime.sh)
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-TASK="AIME-TTT"
+TASK="AMC-TTT"
 BACKBONE="Qwen2.5-3B"
 ADVANTAGE="grpo"
 
@@ -76,13 +76,12 @@ else
   N=16
 fi
 
-EPISODE=10
+EPISODE=3
 DATA_TRAIN_BATCH_SIZE=4
-N_VOTES_PER_PROMPT=64
-N_SAMPLES_PER_PROMPT=32
-# Same effective batch (train_batch_size * n_samples_per_prompt); smaller micro = more grad accumulation, less memory
+N_VOTES_PER_PROMPT=32
+N_SAMPLES_PER_PROMPT=16
 MINI_BATCH_SIZE=1
-MICRO_BATCH_SIZE=1
+MICRO_BATCH_SIZE=2
 
 DATA_LOCAL_DIR="${REPO_ROOT}/verl/data"
 BACKBONE_PATH="Qwen/Qwen2.5-3B"
@@ -126,7 +125,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.rollout.name=vllm \
-  actor_rollout_ref.rollout.temperature=0.6\
+  actor_rollout_ref.rollout.temperature=0.6 \
   actor_rollout_ref.rollout.enforce_eager=False \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \

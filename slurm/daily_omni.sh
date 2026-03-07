@@ -13,13 +13,20 @@
 # Ensure log dirs exist (some clusters do not create them)
 mkdir -p slurm/out slurm/err
 
-# Optional: reduce CUDA fragmentation (can help with OOM)
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# W&B: online mode for cloud sync. Set WANDB_API_KEY (e.g. export WANDB_API_KEY=xxx or wandb login).
+export WANDB_MODE=online
+
+export SANITY_CHECK=1
+export CONTENT_PARENT_CATEGORY=Education
+export N_SANITY=320
 export TTRL_DEBUG=1
 export VAL_DEBUG=1
 
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
-conda activate verl310
+conda activate verl312
+
+# Clear stale .pyc caches so restored/edited source files are always used
+find "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}/verl" -name "*.pyc" -delete 2>/dev/null || true
 
 # Run from repo root so paths in the training script resolve (e.g. custom_reward_function.path)
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}" || exit 1

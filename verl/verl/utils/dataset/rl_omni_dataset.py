@@ -163,7 +163,9 @@ class RLOMNIDataset(Dataset):
 
         if self.suffix_prompt:
             print(f"Apply suffix prompt {self.suffix_prompt}")
-            self.dataframe = self.dataframe.map(self._add_suffix_to_entry, num_proc=self.num_workers)
+            # Use num_proc=None (main process, no subprocess) — string-append is trivial and
+            # forking inside a Ray actor causes SIGTERM from inherited Ray handles.
+            self.dataframe = self.dataframe.map(self._add_suffix_to_entry, num_proc=None)
 
         # filter out too long prompts
         if self.filter_overlong_prompts:
@@ -262,8 +264,13 @@ class RLOMNIDataset(Dataset):
         return messages
     
     def _add_suffix_to_entry(self, entry):
-        # Assuming 'text' is the field where the prompt should be added
-        entry[self.prompt_key][-1]["content"] = entry[self.prompt_key][-1]["content"] + self.suffix_prompt
+        # OmniVideo format: entry has question_key / video_file_key, no prompt list
+        if self.question_key in entry:
+            entry[self.question_key] = entry[self.question_key] + self.suffix_prompt
+            return entry
+        # Standard format: entry has prompt_key (list of messages)
+        if self.prompt_key in entry:
+            entry[self.prompt_key][-1]["content"] = entry[self.prompt_key][-1]["content"] + self.suffix_prompt
         return entry
     
     def __getitem__(self, item):
@@ -345,8 +352,9 @@ class RLOMNIDataset(Dataset):
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
 
-            if "second_per_grid_ts" in model_inputs:
-                model_inputs.pop("second_per_grid_ts")
+            # Preserve second_per_grid_ts and feature_attention_mask for M-RoPE computation
+            second_per_grid_ts = model_inputs.pop("second_per_grid_ts", None)
+            feature_attention_mask = model_inputs.get("feature_attention_mask", None)
 
             # Store multi_modal_data and multi_modal_inputs
             row_dict["multi_modal_data"] = multi_modal_data
@@ -354,9 +362,6 @@ class RLOMNIDataset(Dataset):
             
             # Store use_audio_in_video flag for model forward pass
             row_dict["multi_modal_inputs"]["use_audio_in_video"] = self.use_audio_in_video
-
-            # second_per_grid_ts isn't used for training, just for mrope
-            row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
             if self.enable_thinking is not None:
@@ -381,13 +386,29 @@ class RLOMNIDataset(Dataset):
             processor_class_name = getattr(self.processor, 'image_processor', None)
             processor_class_name = processor_class_name.__class__.__name__ if processor_class_name else ""
             
-            # Get the main processor class name to check for Qwen2.5-Omni
             main_processor_class = self.processor.__class__.__name__
             is_qwen2_5_omni = "Qwen2_5Omni" in main_processor_class or "Qwen25Omni" in main_processor_class
             
-            # Qwen2.5-Omni uses different special tokens than Qwen2-VL, so skip get_rope_index
-            # Qwen2.5-Omni handles position IDs internally in the model
-            if not is_qwen2_5_omni and ("Qwen2VLImageProcessor" in processor_class_name or "Qwen3Omni" in processor_class_name):
+            if is_qwen2_5_omni:
+                from verl.models.transformers.qwen2_5_omni import get_rope_index as get_rope_index_omni
+
+                audio_seqlens = None
+                if feature_attention_mask is not None:
+                    audio_seqlens = torch.sum(feature_attention_mask, dim=1)
+
+                position_ids = [
+                    get_rope_index_omni(
+                        self.processor,
+                        input_ids=input_ids[0],
+                        image_grid_thw=model_inputs.get("image_grid_thw"),
+                        video_grid_thw=model_inputs.get("video_grid_thw"),
+                        attention_mask=attention_mask[0],
+                        use_audio_in_video=self.use_audio_in_video,
+                        audio_seqlens=audio_seqlens,
+                        second_per_grids=second_per_grid_ts,
+                    )
+                ]  # (1, 3, seq_len)
+            elif "Qwen2VLImageProcessor" in processor_class_name or "Qwen3Omni" in processor_class_name:
                 from verl.models.transformers.qwen2_vl import get_rope_index
 
                 position_ids = [

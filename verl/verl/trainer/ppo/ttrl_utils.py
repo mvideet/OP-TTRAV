@@ -135,12 +135,12 @@ def _batch_majority_vote(model_outputs: List[str], n: int) -> tuple[List[str], L
 def _majority_vote(model_outputs: List[str]) -> tuple[str, float]:
     assert len(model_outputs) > 0
     
-    # DEBUG: Show raw model outputs (first 200 chars each)
+    # DEBUG: Show full raw model outputs when TTRL_DEBUG=1
     TTRL_DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
     if TTRL_DEBUG:
         print(f"\n[TTRL DEBUG] _majority_vote called with {len(model_outputs)} outputs")
         for idx, out in enumerate(model_outputs):
-            print(f"  Output {idx}: {out[:200]}..." if len(out) > 200 else f"  Output {idx}: {out}")
+            print(f"  Output {idx}: {out}")
     
 
     print(f"================================================\n")
@@ -249,20 +249,11 @@ def _batch_compute_ttrl_metrics(
         prompt_majority_label = majority_label[i * n:(i + 1) * n]
         prompt_gt_label = gt_label[i * n:(i + 1) * n]
 
-        if i == 0:
-            print(f"[TTRL] _batch_compute_ttrl_metrics: first prompt group (n={n})", file=sys.stderr)
-            print(f"[TTRL]   prompt_gt_label types: {[type(x).__name__ for x in prompt_gt_label]}", file=sys.stderr)
-            print(f"[TTRL]   prompt_majority_label types: {[type(x).__name__ for x in prompt_majority_label]}", file=sys.stderr)
-
         assert Counter(prompt_majority_label).most_common(1)[0][1] == n
         assert Counter(prompt_gt_label).most_common(1)[0][1] == n
 
         prompt_majority_label_str = _label_to_str(prompt_majority_label[0])
         prompt_gt_label_str = _label_to_str(prompt_gt_label[0])
-        if i == 0:
-            m_preview = (prompt_majority_label_str[:60] + "...") if len(prompt_majority_label_str) > 60 else prompt_majority_label_str
-            g_preview = (prompt_gt_label_str[:60] + "...") if len(prompt_gt_label_str) > 60 else prompt_gt_label_str
-            print(f"[TTRL]   after _label_to_str: majority_gt='{m_preview}', original_gt='{g_preview}'", file=sys.stderr)
 
         ttrl_metric = _prompt_compute_ttrl_metrics(prompt_majority_reward, prompt_gt_reward, prompt_majority_label_str, prompt_gt_label_str)
         ttrl_metrics.append(ttrl_metric)
