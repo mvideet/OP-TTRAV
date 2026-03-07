@@ -8,6 +8,7 @@ build/
 dist/
 *.egg-info/
 *.whl
+*.whl.1
 
 # Compiled extensions
 *.so
@@ -38,6 +39,8 @@ slurm/out/*
 # Training checkpoints (large, should not be tracked)
 checkpoints/
 sft_checkpoints/
+verl/*.whl
+verl/*.whl.1
 
 .cursor/
 
