@@ -196,15 +196,16 @@ class TaskRunner:
         )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
+        use_omnivideo_text = config.data.get("use_omnivideo_text", False)
         # Select collate_fn based on dataset type
-        if use_qwen3_omni or use_qwen2_5_omni:
+        if use_qwen3_omni or use_qwen2_5_omni or use_omnivideo_text:
             from verl.utils.dataset.rl_omni_dataset import collate_fn
         else:
             from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni or use_omnivideo_text)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, use_qwen3_omni or use_qwen2_5_omni or use_omnivideo_text)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
@@ -261,7 +262,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, use_qwen3_o
                 f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
             )
     elif use_qwen3_omni:
-        # Use RLOMNIDataset for Qwen3-Omni multimodal training
+        # Use RLOMNIDataset for Qwen3-Omni multimodal or OmniVideoText (question format)
         dataset_cls = RLOMNIDataset
     else:
         # Use the default RLHFDataset class if no custom class is specified

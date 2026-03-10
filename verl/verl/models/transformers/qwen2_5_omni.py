@@ -201,6 +201,12 @@ def forward_with_torch_backend(
     """
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
+    if labels is not None and torch.any(labels < 0):
+        raise ValueError(
+            "The fused PPO forward path does not support labels with ignore indices. "
+            "Pass `input_ids` for PPO log-prob computation, or sanitize `labels` before calling this wrapper."
+        )
+
     outputs = forward_base_model(
         self,
         input_ids=input_ids,
@@ -284,6 +290,12 @@ def forward_with_triton_backend(
     Uses fused kernels for better performance.
     """
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+
+    if labels is not None and torch.any(labels < 0):
+        raise ValueError(
+            "The fused PPO forward path does not support labels with ignore indices. "
+            "Pass `input_ids` for PPO log-prob computation, or sanitize `labels` before calling this wrapper."
+        )
 
     outputs = forward_base_model(
         self,

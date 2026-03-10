@@ -195,6 +195,12 @@ class RLOMNIDataset(Dataset):
             else:
 
                 def doc2len(doc) -> int:
+                    if self.question_key in doc:
+                        messages = self._build_messages(doc.copy())
+                        raw_prompt = tokenizer.apply_chat_template(
+                            messages, add_generation_prompt=True, tokenize=False
+                        )
+                        return len(tokenizer.encode(raw_prompt, add_special_tokens=False))
                     return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
 
             self.dataframe = self.dataframe.filter(
@@ -221,25 +227,25 @@ class RLOMNIDataset(Dataset):
         """
         Build chat messages from example data.
         
-        Supports two formats:
+        Supports three formats:
         1. Standard format with 'prompt' key containing chat messages
-        2. OmniVideo format with 'question', 'video_file' keys
+        2. OmniVideo format with 'question', 'video_file' keys (multimodal)
+        3. OmniVideoText format with 'question' only (text-only, no video/audio)
         """
-        # Check if this is OmniVideo format (has question and video_file)
-        if self.video_file_key in example and self.question_key in example:
-            # Build messages from OmniVideo format
+        # Check if this is OmniVideo or OmniVideoText format (has question)
+        if self.question_key in example:
             question = example.get(self.question_key, "")
             video_file = example.get(self.video_file_key, "")
-            
-            # Build the message with video placeholder
-            content_list = [
-                {"type": "video", "video": video_file},
-                {"type": "text", "text": question}
-            ]
-            
-            messages = [
-                {"role": "user", "content": content_list}
-            ]
+            # OmniVideo: include video (content_list for multimodal processor)
+            if video_file:
+                content_list = [
+                    {"type": "video", "video": video_file},
+                    {"type": "text", "text": question}
+                ]
+                messages = [{"role": "user", "content": content_list}]
+            else:
+                # OmniVideoText: text-only, use plain string for text-model chat template
+                messages = [{"role": "user", "content": question}]
             return messages
         
         # Standard format with prompt key
@@ -347,7 +353,14 @@ class RLOMNIDataset(Dataset):
                     videos = [process_video({"video": video_path})]
                     multi_modal_data["video"] = [video.numpy() for video in videos]
 
-                model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+                # Text-only (OmniVideoText): processor may not support images/videos kwargs
+                if images is None and videos is None:
+                    try:
+                        model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
+                    except TypeError:
+                        model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                else:
+                    model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
