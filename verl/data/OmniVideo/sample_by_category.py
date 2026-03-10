@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--question-type", type=str, default=None,
                         help="If set, keep only items with this question_type (e.g. Reasoning)")
     parser.add_argument("--content-parent-category", type=str, default=None,
-                        help="If set, keep only items with this content_parent_category (e.g. Education)")
+                        help="If set, keep only items with this content_parent_category. Comma-separated for multiple (e.g. Education,Entertainment)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--suffix", type=str, default="sanity", help="Output suffix: train_<suffix>.json")
     args = parser.parse_args()
@@ -96,12 +96,12 @@ def main():
                 f"(train: {len(train_data)}, test: {len(test_data)})"
             )
     elif args.content_parent_category:
-        cat_val = args.content_parent_category.strip()
-        train_data = [x for x in train_data if (x.get(CATEGORY_KEY_PARENT) or "").strip() == cat_val]
-        test_data = [x for x in test_data if (x.get(CATEGORY_KEY_PARENT) or "").strip() == cat_val]
+        allowed = {c.strip() for c in args.content_parent_category.split(",") if c.strip()}
+        train_data = [x for x in train_data if (x.get(CATEGORY_KEY_PARENT) or "").strip() in allowed]
+        test_data = [x for x in test_data if (x.get(CATEGORY_KEY_PARENT) or "").strip() in allowed]
         if not train_data or not test_data:
             raise SystemExit(
-                f"No items with content_parent_category={args.content_parent_category!r} found "
+                f"No items with content_parent_category in {allowed!r} found "
                 f"(train: {len(train_data)}, test: {len(test_data)})"
             )
 

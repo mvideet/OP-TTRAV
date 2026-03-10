@@ -53,7 +53,7 @@ MAX_RESPONSE_LENGTH=256
 # OOM fix: MICRO_BATCH_SIZE=1 and N_VOTES_PER_PROMPT=8 reduce peak memory for 10k-token sequences.
 EPISODE=10
 DATA_TRAIN_BATCH_SIZE=4
-N_VOTES_PER_PROMPT=8
+N_VOTES_PER_PROMPT=16
 N_SAMPLES_PER_PROMPT=4
 MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
@@ -116,7 +116,7 @@ python -m verl.trainer.main_ppo \
   data.val_batch_size=8 \
   data.filter_overlong_prompts=False \
   data.truncation='error' \
-  +data.suffix_prompt='"\nExplain your reasoning step by step in detail, then finish with one boxed letter: \\boxed{A}, \\boxed{B}, \\boxed{C}, or \\boxed{D}."' \
+  +data.suffix_prompt='"\nExplain your reasoning step by step in detail, then give your final answer within \boxed{}."' \
   +data.collate_fn=verl.utils.dataset.collate_fn.default_collate_fn \
   data.trust_remote_code=True \
   data.use_qwen2_5_omni=True \
@@ -146,12 +146,12 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
   actor_rollout_ref.rollout.name=hf \
   actor_rollout_ref.rollout.micro_batch_size=8 \
-  actor_rollout_ref.rollout.temperature=1.0 \
+  actor_rollout_ref.rollout.temperature=0.6 \
   actor_rollout_ref.rollout.do_sample=True \
   actor_rollout_ref.rollout.top_p=0.95 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.n=$N_VOTES_PER_PROMPT \
-  +actor_rollout_ref.rollout.num_return_sequences_batch_size=$N_VOTES_PER_PROMPT \
+  +actor_rollout_ref.rollout.num_return_sequences_batch_size=8 \
   actor_rollout_ref.rollout.val_kwargs.do_sample=True \
   actor_rollout_ref.rollout.val_kwargs.n=4 \
   actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \

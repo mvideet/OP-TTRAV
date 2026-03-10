@@ -17,8 +17,8 @@ mkdir -p slurm/out slurm/err
 export WANDB_MODE=online
 
 export SANITY_CHECK=1
-export CONTENT_PARENT_CATEGORY=Education
-export N_SANITY=320
+export CONTENT_PARENT_CATEGORY="Education,Entertainment"
+export N_SANITY=450
 export TTRL_DEBUG=1
 export VAL_DEBUG=1
 

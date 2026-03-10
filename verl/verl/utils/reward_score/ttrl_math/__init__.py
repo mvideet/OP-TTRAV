@@ -1,7 +1,7 @@
 # Copyright 2024 PRIME team and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except Exception in compliance with the License.
+# you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -14,6 +14,9 @@
 
 """Provides a math answer grading function with high recall.
 Based on HF math_verify, verl, open reasoner zero, etc.
+
+For research: we only parse and give reward when the model outputs the answer
+in \\boxed{} format. Otherwise we return 0 reward so the model learns to use that behavior.
 """
 
 from latex2sympy2_extended import latex2sympy
@@ -28,6 +31,7 @@ This code is adapted from Entropy Machanism Recipe (https://github.com/volcengin
 """
 
 def extract_answer(passage: str) -> str:
+    """Only parse when the model uses \\boxed{}; otherwise return None (no reward)."""
     if "\\boxed" in passage:
         return extract_boxed_answer(passage)
     return None
@@ -65,8 +69,8 @@ def simplify_expression_string(expression_string: str) -> str:
             return expression_string
 
 def compute_score(model_response, gt_answer, fast=False):
+    # Only parse and grade when model uses \boxed{}; else 0 reward so it learns the format.
     model_answer = extract_answer(model_response)
-
     if model_answer is None:
         return {
             "score": 0.0,
@@ -75,7 +79,6 @@ def compute_score(model_response, gt_answer, fast=False):
             "extracted_gt": gt_answer,
             "pred": "",
         }
-        # return 0.0, 0.0  # Cannot even parse anything.
     is_correct = False
     if isinstance(gt_answer, float) or isinstance(gt_answer, int):
         gt_answer = str(gt_answer)

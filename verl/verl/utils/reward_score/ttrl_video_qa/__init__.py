@@ -14,6 +14,10 @@
 
 """Provides video QA answer grading for multiple choice questions.
 Designed for OmniVideo-style audio-visual reasoning tasks.
+
+For research: we only parse and give reward when the model outputs the answer
+in \\boxed{} format (e.g. \\boxed{A}, \\boxed{B}). Otherwise we return 0 reward
+so the model learns to use that behavior.
 """
 
 import re
@@ -22,60 +26,15 @@ import traceback
 
 def extract_answer(response: str) -> str:
     """
-    Extract the answer choice (A, B, C, D, etc.) from model response.
-    
-    Looks for patterns like:
-    - "A. explanation" (answer at start)
-    - "The answer is A"
-    - "Answer: B"  
-    - "(C)"
-    - "\\boxed{D}"
-    - Just the letter at the end
+    Extract the answer choice only when it appears in \\boxed{X} format.
+    Returns None otherwise so the model learns to output \\boxed{A/B/C/D}.
     """
     if not response:
         return None
-    
     response = response.strip()
-    
-    # Try to find boxed answer first (for models that use LaTeX formatting)
     boxed_match = re.search(r'\\boxed\{([A-Da-d])\}', response)
     if boxed_match:
         return boxed_match.group(1).upper()
-    
-    # Look for "answer is X" pattern
-    answer_is_match = re.search(r'(?:answer|choice|option)\s*(?:is|:)\s*[(\[]?\s*([A-Da-d])\s*[)\]]?', response, re.IGNORECASE)
-    if answer_is_match:
-        return answer_is_match.group(1).upper()
-    
-    # NEW: Look for "X." or "X:" at the BEGINNING of response (common format: "B. The answer is...")
-    # This handles responses like "A. explanation text" or "B: some reasoning"
-    start_letter_match = re.match(r'^([A-Da-d])\s*[.:)\]]\s*', response)
-    if start_letter_match:
-        return start_letter_match.group(1).upper()
-    
-    # Look for standalone letter in parentheses or brackets at end
-    paren_match = re.search(r'[(\[]\s*([A-Da-d])\s*[)\]]\s*$', response)
-    if paren_match:
-        return paren_match.group(1).upper()
-    
-    # Look for "X." or "X:" pattern at end (like "A." or "B:")
-    letter_match = re.search(r'\b([A-Da-d])\s*[.):]\s*$', response)
-    if letter_match:
-        return letter_match.group(1).upper()
-    
-    # Last resort: find any standalone A/B/C/D in the first or last part of response
-    # Check first 50 chars first (answer often at beginning)
-    first_part = response[:50] if len(response) > 50 else response
-    first_letter_match = re.search(r'\b([A-Da-d])\b', first_part)
-    if first_letter_match:
-        return first_letter_match.group(1).upper()
-    
-    # Then check last 100 chars
-    last_part = response[-100:] if len(response) > 100 else response
-    last_letter_match = re.search(r'\b([A-Da-d])\b', last_part)
-    if last_letter_match:
-        return last_letter_match.group(1).upper()
-    
     return None
 
 
