@@ -15,11 +15,11 @@
 """Provides video QA answer grading for multiple choice questions.
 Designed for OmniVideo-style audio-visual reasoning tasks.
 
-For research: we only parse and give reward when the model outputs the answer
-in \\boxed{} format (e.g. \\boxed{A}, \\boxed{B}). Otherwise we return 0 reward
-so the model learns to use that behavior.
+When the model outputs \\boxed{X}, we parse and grade. When we cannot parse
+(e.g. no \\boxed{}), we treat it as a random guess (A/B/C/D) for fair evaluation.
 """
 
+import random
 import re
 import traceback
 
@@ -71,22 +71,18 @@ def compute_score(model_response: str, gt_answer: str) -> dict:
         Dictionary with score, format_score, acc, extracted_gt, pred
     """
     model_answer = extract_answer(model_response)
-    
+    format_ok = model_answer is not None
     if model_answer is None:
-        return {
-            "score": 0.0,
-            "format_score": 0.0,
-            "acc": False,
-            "extracted_gt": gt_answer,
-            "pred": "",
-        }
+        # Cannot parse: treat as random guess (A/B/C/D) for fair evaluation
+        model_answer = random.choice(["A", "B", "C", "D"])
     
     is_correct = grade(model_answer, gt_answer)
+    format_score = 1.0 if format_ok else 0.0
     
     if is_correct:
         return {
             "score": 1.0,
-            "format_score": 1.0,
+            "format_score": format_score,
             "acc": True,
             "extracted_gt": gt_answer,
             "pred": model_answer,
@@ -94,7 +90,7 @@ def compute_score(model_response: str, gt_answer: str) -> dict:
     else:
         return {
             "score": 0.0,
-            "format_score": 1.0,
+            "format_score": format_score,
             "acc": False,
             "extracted_gt": gt_answer,
             "pred": model_answer,

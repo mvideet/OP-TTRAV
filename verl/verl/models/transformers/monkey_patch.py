@@ -182,10 +182,13 @@ def patch_forward_with_backends(
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     elif model.config.model_type in ["qwen2_5_omni", "qwen2_5_omni_thinker"]:
-        # Use custom Qwen2.5-Omni implementation that handles multimodal inputs
-        # Handles both the full model and the thinker model (which we use for RL training)
-        from verl.models.transformers.qwen2_5_omni import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.qwen2_5_omni import (
+            forward_with_torch_backend,
+            forward_with_triton_backend,
+            set_original_forward,
+        )
 
+        set_original_forward(model.__class__.forward)
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     else:

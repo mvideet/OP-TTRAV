@@ -13,6 +13,8 @@
 # limitations under the License.
 from typing import List
 from collections import Counter
+import math
+import random
 import sys
 import torch
 import numpy as np
@@ -84,15 +86,14 @@ def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer):
             response_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             model_outputs.append(response_str)
 
-    majority_gt_list, majority_ratio_list = _batch_majority_vote(model_outputs, n)
+    majority_gt_list, majority_ratio_list, vote_stats_list = _batch_majority_vote(model_outputs, n)
     
     assert len(batch) == len(majority_gt_list), "batch length must be equal to the number of model outputs"
     
-    if os.environ.get("TTRL_DEBUG", "0") == "1":
+    TTRL_DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
+    if TTRL_DEBUG:
         print(f"\n[TTRL DEBUG] apply_ttrl_gt: {num_prompts} prompts, {n} votes each", file=sys.stderr)
     
-    # Debug: show type of ground_truth from dataset (can be list -> causes Counter to fail if not normalized)
-    TTRL_DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
     for i in range(num_prompts):
         data_item = batch[i]
         original_gt = data_item.non_tensor_batch["reward_model"]["ground_truth"]
@@ -102,53 +103,82 @@ def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer):
         data_item.non_tensor_batch["reward_model"]["majority_gt"] = majority_gt_list[i]
         data_item.non_tensor_batch["reward_model"]["original_gt"] = original_gt
         
-        if TTRL_DEBUG and i < 3:  # Show first 3 prompts
+        # Log input files and question for each prompt
+        nb = data_item.non_tensor_batch
+        video_file = nb.get("video_file", "N/A")
+        audio_file = nb.get("audio_file", "N/A")
+        question_text = nb.get("question", "N/A")
+        sample_id = nb.get("id", nb.get("index", i))
+        q_type = nb.get("question_type", nb.get("source", "N/A"))
+        print(
+            f"[TTRL INPUT] prompt {i}/{num_prompts} | id={sample_id} | type={q_type}"
+            f" | gt={original_gt} -> majority={majority_gt_list[i]} (ratio={majority_ratio_list[i]:.2f})"
+            f"\n  video: {video_file}"
+            f"\n  audio: {audio_file}"
+            f"\n  question: {question_text[:200]}{'...' if len(str(question_text)) > 200 else ''}",
+            file=sys.stderr, flush=True,
+        )
+        
+        if TTRL_DEBUG and i < 3:
             print(f"  Prompt {i}: original_gt type={type(original_gt).__name__} value='{original_gt}' -> majority_gt='{majority_gt_list[i]}' (ratio={majority_ratio_list[i]:.2f})", file=sys.stderr)
 
     batch.non_tensor_batch["majority_ratio_list"] = np.array(majority_ratio_list, dtype=float)
+    batch.non_tensor_batch["vote_stats_list"] = np.array(vote_stats_list, dtype=object)
     return batch
 
 
-def _batch_majority_vote(model_outputs: List[str], n: int) -> tuple[List[str], List[float]]:
+def _batch_majority_vote(model_outputs: List[str], n: int) -> tuple[List[str], List[float], List[dict]]:
     """
     Used to generate the ground truth for TTRL.
-    Input:
-        model_outputs: list of str
-        n: int
-    Output:
+    Returns:
         majority_gt_list: list of str
         majority_ratio_list: list of float
+        vote_stats_list: list of dict with per-prompt vote distribution stats
     """
     majority_gt_list = []
     majority_ratio_list = []
+    vote_stats_list = []
     assert len(model_outputs) % n == 0
     n_prompts = len(model_outputs) // n
     for i in range(n_prompts):
-        prompt_outputs = model_outputs[i * n:(i + 1) * n] # indexing: [0, n-1], [n, 2n-1], ...
-        prompt_majority_gt, prompt_majority_ratio = _majority_vote(prompt_outputs)
+        prompt_outputs = model_outputs[i * n:(i + 1) * n]
+        prompt_majority_gt, prompt_majority_ratio, vote_stats = _majority_vote(prompt_outputs)
         majority_gt_list.append(prompt_majority_gt)
         majority_ratio_list.append(prompt_majority_ratio)
+        vote_stats_list.append(vote_stats)
         
-    return majority_gt_list, majority_ratio_list
+    return majority_gt_list, majority_ratio_list, vote_stats_list
 
 
-def _majority_vote(model_outputs: List[str]) -> tuple[str, float]:
+def _vote_entropy(counter: Counter, total: int, n_choices: int = 4) -> float:
+    """Normalized Shannon entropy of vote distribution. 0 = unanimous, 1 = uniform over n_choices."""
+    if total == 0:
+        return 0.0
+    entropy = 0.0
+    for count in counter.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log2(p)
+    max_entropy = math.log2(n_choices)
+    return entropy / max_entropy if max_entropy > 0 else 0.0
+
+
+def _majority_vote(model_outputs: List[str]) -> tuple[str, float, dict]:
     assert len(model_outputs) > 0
+    n = len(model_outputs)
     
-    # DEBUG: Show full raw model outputs when TTRL_DEBUG=1
     TTRL_DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
     if TTRL_DEBUG:
-        print(f"\n[TTRL DEBUG] _majority_vote called with {len(model_outputs)} outputs")
+        print(f"\n[TTRL DEBUG] _majority_vote called with {n} outputs")
         for idx, out in enumerate(model_outputs):
             print(f"  Output {idx}: {out}")
-    
 
-    print(f"================================================\n")
     raw_model_answers = [extract_answer(generated_text) for generated_text in model_outputs]
     
     if TTRL_DEBUG:
         print(f"[TTRL DEBUG] Raw extracted answers: {raw_model_answers}")
     
+    n_unparseable = sum(1 for a in raw_model_answers if a is None)
     model_answers = [answer for answer in raw_model_answers if answer is not None]
     model_answers = [simplify_expression_string(answer) for answer in model_answers]
     
@@ -156,19 +186,34 @@ def _majority_vote(model_outputs: List[str]) -> tuple[str, float]:
         print(f"[TTRL DEBUG] After filtering None and simplify: {model_answers}")
     
     if len(model_answers) == 0:
+        fallback = random.choice(["A", "B", "C", "D"])
         if TTRL_DEBUG:
-            print(f"[TTRL DEBUG] WARNING: All answers were None! Returning 'None', 0.0")
-        return "None", 0.0
+            print(f"[TTRL DEBUG] WARNING: All answers were None! Random fallback: {fallback}")
+        vote_stats = {
+            "n_total": n,
+            "n_unparseable": n_unparseable,
+            "n_unique_answers": 0,
+            "vote_entropy": 0.0,
+            "unanimous": False,
+        }
+        return fallback, 0.0, vote_stats
     
     counter = Counter(model_answers)
-    
     majority_answer, majority_count = counter.most_common(1)[0]
-    majority_ratio = majority_count / len(model_outputs)
+    majority_ratio = majority_count / n
+    
+    vote_stats = {
+        "n_total": n,
+        "n_unparseable": n_unparseable,
+        "n_unique_answers": len(counter),
+        "vote_entropy": _vote_entropy(counter, len(model_answers)),
+        "unanimous": len(counter) == 1 and n_unparseable == 0,
+    }
     
     if TTRL_DEBUG:
-        print(f"[TTRL DEBUG] Majority answer: {majority_answer}, ratio: {majority_ratio}")
+        print(f"[TTRL DEBUG] Majority answer: {majority_answer}, ratio: {majority_ratio}, stats: {vote_stats}")
     
-    return majority_answer, majority_ratio
+    return majority_answer, majority_ratio, vote_stats
 
 
 # === Metrics Computation ===
@@ -225,6 +270,24 @@ def compute_ttrl_metrics(batch, n):
     majority_ratio_list = batch.non_tensor_batch["majority_ratio_list"]
     majority_ratio = sum(majority_ratio_list) / len(majority_ratio_list)
     ttrl_metrics["majority_ratio"] = majority_ratio
+
+    # Aggregate vote distribution stats across prompts.
+    # vote_stats_list is repeated n times (once per sample), deduplicate by stride n.
+    vote_stats_list = batch.non_tensor_batch.get("vote_stats_list", None)
+    if vote_stats_list is not None and len(vote_stats_list) > 0:
+        unique_stats = [vote_stats_list[i] for i in range(0, len(vote_stats_list), n)]
+        num_p = len(unique_stats)
+        avg_entropy = sum(s["vote_entropy"] for s in unique_stats) / num_p
+        avg_unique = sum(s["n_unique_answers"] for s in unique_stats) / num_p
+        frac_unanimous = sum(1 for s in unique_stats if s["unanimous"]) / num_p
+        total_unparseable = sum(s["n_unparseable"] for s in unique_stats)
+        total_votes = sum(s["n_total"] for s in unique_stats)
+        frac_unparseable = total_unparseable / total_votes if total_votes > 0 else 0.0
+
+        ttrl_metrics["vote_entropy"] = avg_entropy
+        ttrl_metrics["vote_n_unique_answers"] = avg_unique
+        ttrl_metrics["vote_frac_unanimous"] = frac_unanimous
+        ttrl_metrics["vote_frac_unparseable"] = frac_unparseable
 
     return ttrl_metrics
 

@@ -47,8 +47,14 @@ from tensordict import TensorDict
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.worker.worker_base import WorkerWrapperBase
+try:
+    from vllm.model_executor.sampling_metadata import SamplingMetadata
+except ModuleNotFoundError:
+    from vllm.v1.sample.metadata import SamplingMetadata  # vLLM 0.16+
+try:
+    from vllm.worker.worker_base import WorkerWrapperBase
+except ModuleNotFoundError:
+    from vllm.v1.worker.worker_base import WorkerWrapperBase  # vLLM 0.16+
 
 from verl import DataProto
 from verl.utils.debug import GPUMemoryLogger
@@ -153,6 +159,8 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        # vLLM 0.16+ removed disable_mm_preprocessor_cache from EngineArgs
+        engine_kwargs.pop("disable_mm_preprocessor_cache", None)
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 

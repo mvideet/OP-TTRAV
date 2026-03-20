@@ -1,22 +1,15 @@
 #!/bin/bash
-# TTRL fine-tuning of Qwen2.5-Omni model on OmniVideo dataset
-
-# ------------------------------------------------------------
-# Environment Setup (aligned with slurm/aime.sh)
-# ------------------------------------------------------------
+# TTRL: Qwen2.5-Omni on the OmniVideo (daily) JSON, text-only — same questions as full multimodal
+# runs but no video/audio loaded. Set data.use_omnivideo_text=True (see RLOMNIDataset).
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
-# HF rollout uses the FSDP actor directly - no vLLM, no FlashInfer JIT needed
-# expandable_segments reduces memory fragmentation during FSDP + generation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Video QA: use ttrl_video_qa extract_answer/grade
 export TTRL_TASK_TYPE=video_qa
 export HF_DATASETS_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
 
-# Resolve repo root; fallback when script has no path (e.g. run as "daily_omni.sh" from TTRL)
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
 if [[ ! -d "${REPO_ROOT}/verl/verl" && -n "${SLURM_SUBMIT_DIR}" && -d "${SLURM_SUBMIT_DIR}/verl/verl" ]]; then
@@ -25,7 +18,6 @@ fi
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
-# Cluster: writable runtime dirs for Ray
 unset ROCR_VISIBLE_DEVICES || true
 export ROCR_VISIBLE_DEVICES=
 export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
@@ -34,7 +26,6 @@ chmod 700 "$XDG_RUNTIME_DIR"
 export RAY_TMPDIR="/data/sls/scratch/mvideet/ray_tmp/${SLURM_JOB_ID:-manual}"
 mkdir -p "$RAY_TMPDIR"
 
-
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
@@ -42,13 +33,10 @@ TASK="OmniVideo"
 BACKBONE="Qwen2.5-Omni-3B"
 ADVANTAGE="grpo"
 
-# Omni-specific: large prompt lengths due to video/audio tokens (input is ~10k)
-MAX_PROMPT_LENGTH=10000
-# Reasoning chain + final \boxed{} answer; 512 tokens gives room for step-by-step CoT
+# Text-only: short prompts (no vision tokens)
+MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=512
 
-# MINI_BATCH_SIZE * N_VOTES_PER_PROMPT must be >= n_gpus (e.g. 4)
-# OOM fix: MICRO_BATCH_SIZE=1 and N_VOTES_PER_PROMPT=8 reduce peak memory for 10k-token sequences.
 EPISODE=10
 DATA_TRAIN_BATCH_SIZE=4
 N_VOTES_PER_PROMPT=16
@@ -56,19 +44,9 @@ N_SAMPLES_PER_PROMPT=4
 MINI_BATCH_SIZE=2
 MICRO_BATCH_SIZE=1
 
-
-
-# Memory reduction for large input sequences (~10k tokens):
-# - entropy_from_logits_with_chunking=True reduces entropy peak memory
-# - use_dynamic_bsz=True packs variable-length sequences more efficiently
-# - param_offload + optimizer_offload keeps GPU free between actor/rollout phases
-
 DATA_LOCAL_DIR="${REPO_ROOT}/verl/data/${TASK}"
 BACKBONE_PATH="/data/sls/scratch/mvideet/models/${BACKBONE}"
 
-# Sanity check: randomly sample N total. Set CONTENT_PARENT_CATEGORY to restrict to one category (e.g. Education).
-# Run with: SANITY_CHECK=1 ./daily_omni.sh  (or export SANITY_CHECK=1)
-# If CONTENT_PARENT_CATEGORY is unset/empty: sample N_SANITY from all categories. If set: filter to that category then sample.
 N_SANITY="${N_SANITY:-40}"
 N_GPUS="${N_GPUS:-4}"
 if [[ -n "${SANITY_CHECK}" && "${SANITY_CHECK}" != "0" ]]; then
@@ -84,22 +62,21 @@ if [[ -n "${SANITY_CHECK}" && "${SANITY_CHECK}" != "0" ]]; then
     --suffix sanity
   TRAIN_FILES="${SANITY_DIR}/train_sanity.json"
   VAL_FILES="${SANITY_DIR}/test_sanity.json"
-  # Batch size must be divisible by n_gpus for DataProto.chunk() in rollout
   DATA_TRAIN_BATCH_SIZE=$(( (DATA_TRAIN_BATCH_SIZE + N_GPUS - 1) / N_GPUS * N_GPUS ))
   CAT_DESC="${CONTENT_PARENT_CATEGORY:-all categories}"
-  echo "Sanity check: using ${TRAIN_FILES} and ${VAL_FILES} (content_parent_category=${CAT_DESC}, n_total=${N_SANITY}, train_batch_size=${DATA_TRAIN_BATCH_SIZE})"
+  echo "Sanity check: ${TRAIN_FILES} / ${VAL_FILES} (content_parent_category=${CAT_DESC}, n_total=${N_SANITY})"
 else
   TRAIN_FILES="${DATA_LOCAL_DIR}/train.json"
   VAL_FILES="${DATA_LOCAL_DIR}/test.json"
 fi
 
-MODEL="${TASK}-${BACKBONE}"
-EXPERIMENT="TTRL-Omni"
+MODEL="${TASK}-${BACKBONE}-TextOnly"
+EXPERIMENT="TTRL-Omni-TextOnly"
 
 WANDB_PROJECT="TTRL-verl"
 LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
 OUTPUT_DIR="/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-verl/${MODEL}/${DATE}/${EXPERIMENT}-${ADVANTAGE}-${TIME_TAG}"
-# Re-export PYTHONPATH before run (conda/activate may clear it)
+
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
@@ -107,11 +84,12 @@ python -m verl.trainer.main_ppo \
   --config-name='ppo_trainer_ttrl.yaml' \
   data.train_files=["$TRAIN_FILES"] \
   data.val_files=["$VAL_FILES"] \
+  data.use_omnivideo_text=True \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
   data.max_response_length=$MAX_RESPONSE_LENGTH \
   data.train_batch_size=$DATA_TRAIN_BATCH_SIZE \
   data.val_batch_size=8 \
-  data.filter_overlong_prompts=False \
+  data.filter_overlong_prompts=True \
   data.truncation='error' \
   +data.suffix_prompt='"\nExplain your reasoning step by step in detail, then give your final answer as exactly one of: \\boxed{A}, \\boxed{B}, \\boxed{C}, or \\boxed{D}."' \
   +data.collate_fn=verl.utils.dataset.collate_fn.default_collate_fn \
@@ -124,7 +102,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.model.path=$BACKBONE_PATH \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.model.use_remove_padding=True \
-  actor_rollout_ref.model.enable_activation_offload=True \
+  actor_rollout_ref.model.enable_activation_offload=False \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.actor.use_kl_loss=True \

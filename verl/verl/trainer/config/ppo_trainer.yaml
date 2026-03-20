@@ -91,7 +91,8 @@ data:
   # Whether to use Qwen2.5-Omni model with audio-visual processing.
   use_qwen2_5_omni: False
 
-  # Whether to use OmniVideoText format (question-only, no video/audio) with RLOMNIDataset.
+  # If True, RLOMNIDataset uses question text only: ignores video_file (OmniVideo JSON) and skips
+  # multimodal loading — e.g. Qwen2.5-Omni text-only on the daily OmniVideo split.
   use_omnivideo_text: False
 
   # Whether to extract and use audio from video files (for Qwen3-Omni / Qwen2.5-Omni).

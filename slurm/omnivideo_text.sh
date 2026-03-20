@@ -10,8 +10,9 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --requeue
 
-# TTRL on OmniVideoText (text-only) with Qwen2.5-3B. No sampling - use full dataset.
-# VLLM rollout (text models work fine with VLLM).
+# TTRL on OmniVideoText (text-only) with Qwen2.5-3B-Instruct (chat/instruct weights, not base).
+# Zero KL penalty: no in-reward KL, no actor KL-vs-ref loss (reference policy not loaded for KL).
+# VLLM rollout (text models work well with VLLM).
 
 mkdir -p slurm/out slurm/err
 
@@ -30,7 +31,7 @@ unset VLLM_ATTENTION_BACKEND
 export VLLM_USE_V1=1
 
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
-conda activate verl310
+conda activate verl312
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -55,12 +56,12 @@ export N_GPUS=4
 export NNODES=1
 
 # ------------------------------------------------------------
-# Config: Qwen2.5-3B (text-only) on OmniVideoText, no sampling
+# Config: Qwen2.5-3B-Instruct (HF id below) on OmniVideoText; full train JSON.
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
 TASK="OmniVideoText"
-BACKBONE="Qwen2.5-3B"
+BACKBONE="Qwen2.5_3B_Instruct"
 ADVANTAGE="grpo"
 
 MAX_PROMPT_LENGTH=1024
@@ -74,10 +75,10 @@ MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
 
 DATA_LOCAL_DIR="${REPO_ROOT}/verl/data/${TASK}"
-BACKBONE_PATH="Qwen/Qwen2.5-3B"
+BACKBONE_PATH="Qwen/Qwen2.5-3B-Instruct"
 
 MODEL="${TASK}-${BACKBONE}"
-EXPERIMENT="TTRL-Text"
+EXPERIMENT="TTRL_Text_Instruct_NoKL"
 
 WANDB_PROJECT="TTRL-verl"
 LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
@@ -105,7 +106,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.model.enable_activation_offload=False \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
-  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.use_kl_loss=False \
   actor_rollout_ref.actor.optim.lr=5e-7 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
   actor_rollout_ref.actor.optim.warmup_style='cosine' \
@@ -134,7 +135,7 @@ python -m verl.trainer.main_ppo \
   critic.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   critic.model.fsdp_config.param_offload=False \
   critic.model.fsdp_config.optimizer_offload=False \
-  algorithm.kl_ctrl.kl_coef=0.00 \
+  algorithm.kl_ctrl.kl_coef=0.0 \
   algorithm.adv_estimator=$ADVANTAGE \
   custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_video_qa/__init__.py" \
   custom_reward_function.name=reward_func \
@@ -143,14 +144,14 @@ python -m verl.trainer.main_ppo \
   ttrl.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
-  trainer.experiment_name=$LOG_NAME \
+  trainer.experiment_name="$LOG_NAME" \
   trainer.n_gpus_per_node=${N_GPUS:-4} \
   trainer.nnodes=${NNODES:-1} \
   trainer.save_freq=2000000 \
   trainer.test_freq=2 \
   trainer.max_actor_ckpt_to_keep=0 \
   trainer.max_critic_ckpt_to_keep=0 \
-  trainer.default_local_dir=$OUTPUT_DIR \
+  trainer.default_local_dir="$OUTPUT_DIR" \
   trainer.total_epochs=$EPISODE "$@"
 
 echo "Output directory: $OUTPUT_DIR"

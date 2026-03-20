@@ -13,7 +13,10 @@
 # limitations under the License.
 """
 PPO-specific forward passes for Qwen2.5-Omni models.
-Adapted from Qwen3-Omni implementation for multimodal (audio+video+image+text) RL training.
+
+Delegates the full model forward (multimodal embedding, rope, attention) to the
+original HF Qwen2_5OmniThinkerForConditionalGeneration.forward, then applies a
+fused PPO head (log-probs + entropy) on top of the hidden states.
 """
 
 from dataclasses import dataclass
@@ -22,12 +25,17 @@ from typing import List, Optional, Tuple, Union
 import torch
 from transformers.modeling_outputs import ModelOutput
 
-try:
-    from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
-        Qwen2_5OmniThinkerForCausalLM,
-    )
-except ImportError:
-    Qwen2_5OmniThinkerForCausalLM = None
+
+# ---------------------------------------------------------------------------
+# Original HF forward — saved before monkey-patching so we can delegate to it.
+# ---------------------------------------------------------------------------
+_original_hf_forward = None
+
+
+def set_original_forward(forward_fn):
+    """Save the real HF forward before monkey-patching replaces it."""
+    global _original_hf_forward
+    _original_hf_forward = forward_fn
 
 
 @dataclass
@@ -66,107 +74,40 @@ def forward_base_model(
     **kwargs,
 ):
     """
-    Forward pass for Qwen2.5-Omni thinker model with multimodal inputs.
-    This function implements the forward logic directly to avoid infinite recursion
-    when the forward method is monkey-patched.
-    
-    Based on the Qwen2.5-Omni thinker model's forward implementation.
+    Delegate to the original HF Qwen2_5OmniThinkerForConditionalGeneration.forward.
+
+    We always request ``output_hidden_states=True`` so callers can extract the
+    last decoder hidden state for the PPO head, and force ``labels=None`` so HF
+    skips its own cross-entropy loss (we compute PPO log-probs ourselves).
     """
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-    output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-    
-    if use_audio_in_video is None:
-        use_audio_in_video = False
-
-    # 1. Get input embeddings
-    if inputs_embeds is None:
-        inputs_embeds = self.get_input_embeddings()(input_ids)
-
-    # 2. Process audio features if present
-    if input_features is not None and hasattr(self, 'get_audio_features'):
-        audio_features = self.get_audio_features(
-            input_features,
-            feature_attention_mask=feature_attention_mask,
-            audio_feature_lengths=audio_feature_lengths,
-        )
-        if hasattr(audio_features, 'last_hidden_state'):
-            audio_features = audio_features.last_hidden_state
-        audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
-        
-        if hasattr(self, 'get_placeholder_mask'):
-            _, _, audio_mask = self.get_placeholder_mask(input_ids, inputs_embeds=inputs_embeds)
-            inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
-
-    # 3. Process image features if present
-    if pixel_values is not None and hasattr(self, 'get_image_features'):
-        image_outputs = self.get_image_features(pixel_values, image_grid_thw)
-        if hasattr(image_outputs, 'pooler_output'):
-            image_embeds = image_outputs.pooler_output
-        else:
-            image_embeds = image_outputs
-        image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-        
-        if hasattr(self, 'get_placeholder_mask'):
-            image_mask, _, _ = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-
-    # 4. Process video features if present
-    if pixel_values_videos is not None and hasattr(self, 'get_video_features'):
-        video_outputs = self.get_video_features(pixel_values_videos, video_grid_thw)
-        if hasattr(video_outputs, 'pooler_output'):
-            video_embeds = video_outputs.pooler_output
-        else:
-            video_embeds = video_outputs
-        video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-        
-        if hasattr(self, 'get_placeholder_mask'):
-            _, video_mask, _ = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-
-    # 5. Handle position_ids for multimodal inputs
-    if attention_mask is not None and position_ids is None:
-        if hasattr(self, 'get_rope_index'):
-            if feature_attention_mask is not None:
-                audio_feature_lengths_for_rope = torch.sum(feature_attention_mask, dim=1)
-            else:
-                audio_feature_lengths_for_rope = None
-            
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids,
-                image_grid_thw,
-                video_grid_thw,
-                attention_mask,
-                use_audio_in_video,
-                audio_feature_lengths_for_rope,
-                video_second_per_grid,
-            )
-            self.rope_deltas = rope_deltas
-        else:
-            # Fallback: create position_ids from attention_mask
-            batch_size, seq_length = inputs_embeds.shape[:2]
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-
-    # 6. Call the underlying transformer model
-    outputs = self.model(
+    assert _original_hf_forward is not None, (
+        "Original HF forward not saved. "
+        "Call set_original_forward() before monkey-patching (see monkey_patch.py)."
+    )
+    return _original_hf_forward(
+        self,
+        input_ids=input_ids,
+        input_features=input_features,
+        pixel_values=pixel_values,
+        pixel_values_videos=pixel_values_videos,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
         attention_mask=attention_mask,
+        feature_attention_mask=feature_attention_mask,
+        audio_feature_lengths=audio_feature_lengths,
         position_ids=position_ids,
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
+        rope_deltas=rope_deltas,
+        labels=None,
         use_cache=use_cache,
         output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
+        output_hidden_states=True,
+        return_dict=True,
+        use_audio_in_video=use_audio_in_video,
         cache_position=cache_position,
-        **kwargs,
+        video_second_per_grid=video_second_per_grid,
     )
-    
-    return outputs
 
 
 def forward_with_torch_backend(
@@ -217,7 +158,6 @@ def forward_with_torch_backend(
         use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
-        return_dict=True,  # Always use return_dict for consistency
         pixel_values=pixel_values,
         pixel_values_videos=pixel_values_videos,
         image_grid_thw=image_grid_thw,
@@ -231,9 +171,10 @@ def forward_with_torch_backend(
         cache_position=cache_position,
     )
 
-    hidden_states = outputs[0]
+    # outputs.hidden_states is a tuple of all decoder layers; [-1] is post-norm
+    # (same tensor HF feeds to lm_head).
+    hidden_states = outputs.hidden_states[-1]
 
-    # Get labels for computing log_probs
     if labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
@@ -241,7 +182,6 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    # Use FusedLinearForPPO to compute log_probs and entropy efficiently
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
@@ -253,9 +193,9 @@ def forward_with_torch_backend(
     return Qwen2_5OmniThinkerForCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
-        past_key_values=outputs.past_key_values if hasattr(outputs, 'past_key_values') else None,
-        hidden_states=outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
-        attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
+        past_key_values=getattr(outputs, 'past_key_values', None),
+        hidden_states=getattr(outputs, 'hidden_states', None),
+        attentions=getattr(outputs, 'attentions', None),
     )
 
 
@@ -307,7 +247,6 @@ def forward_with_triton_backend(
         use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
-        return_dict=True,
         pixel_values=pixel_values,
         pixel_values_videos=pixel_values_videos,
         image_grid_thw=image_grid_thw,
@@ -321,9 +260,8 @@ def forward_with_triton_backend(
         cache_position=cache_position,
     )
 
-    hidden_states = outputs[0]
+    hidden_states = outputs.hidden_states[-1]
 
-    # Get labels for computing log_probs
     if labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
@@ -331,7 +269,6 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    # Use Triton-optimized linear_cross_entropy
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
         self.lm_head.weight,
@@ -343,9 +280,9 @@ def forward_with_triton_backend(
     return Qwen2_5OmniThinkerForCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
-        past_key_values=outputs.past_key_values if hasattr(outputs, 'past_key_values') else None,
-        hidden_states=outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
-        attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
+        past_key_values=getattr(outputs, 'past_key_values', None),
+        hidden_states=getattr(outputs, 'hidden_states', None),
+        attentions=getattr(outputs, 'attentions', None),
     )
 
 

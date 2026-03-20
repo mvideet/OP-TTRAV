@@ -128,6 +128,8 @@ class RLOMNIDataset(Dataset):
         # Qwen3-Omni specific settings
         self.use_audio_in_video = config.get("use_audio_in_video", True)  # Always True for AV reasoning
         self.audio_sample_rate = config.get("audio_sample_rate", QWEN_OMNI_SAMPLE_RATE)
+        # If True, treat OmniVideo-style rows as question-only: ignore video_file / multimodal loading.
+        self.use_omnivideo_text = config.get("use_omnivideo_text", False)
         
         self._download()
         self._read_files_and_tokenize()
@@ -183,6 +185,10 @@ class RLOMNIDataset(Dataset):
                     raw_prompt = self.processor.apply_chat_template(
                         messages, add_generation_prompt=True, tokenize=False
                     )
+                    if self.use_omnivideo_text:
+                        return len(
+                            processor(text=[raw_prompt], return_tensors="pt", padding=True)["input_ids"][0]
+                        )
                     images = (
                         [process_image(image) for image in doc.get(image_key, [])] if image_key in doc else None
                     )
@@ -237,10 +243,12 @@ class RLOMNIDataset(Dataset):
             question = example.get(self.question_key, "")
             video_file = example.get(self.video_file_key, "")
             # OmniVideo: include video (content_list for multimodal processor)
-            if video_file:
+            if video_file and not self.use_omnivideo_text:
                 content_list = [
                     {"type": "video", "video": video_file},
                     {"type": "text", "text": question}
+                    # {"type": "text", "text": question},
+                    # {"type": "video", "video": video_file}
                 ]
                 messages = [{"role": "user", "content": content_list}]
             else:
@@ -305,62 +313,68 @@ class RLOMNIDataset(Dataset):
             videos = None
             audios = None
 
-            # Check if this is a Qwen3OmniMoeProcessor (has feature_extractor for audio)
-            is_qwen3_omni = hasattr(self.processor, 'feature_extractor') and self.processor.feature_extractor is not None
-
-            if is_qwen3_omni:
-                # Use official qwen_omni_utils.process_mm_info for Qwen3-Omni
-                # This handles audio extraction from video automatically
-                from qwen_omni_utils import process_mm_info
-                
-                audios, images, videos = process_mm_info(
-                    messages, 
-                    use_audio_in_video=self.use_audio_in_video
-                )
-                
-                # Store multi_modal_data for reference
-                if images:
-                    multi_modal_data["image"] = images
-                if videos:
-                    multi_modal_data["video"] = videos
-                if audios:
-                    multi_modal_data["audio"] = audios
-                
-                # Use Qwen3-Omni processor with all modalities
-                model_inputs = self.processor(
-                    text=[raw_prompt], 
-                    audio=audios, 
-                    images=images, 
-                    videos=videos, 
-                    return_tensors="pt",
-                    padding=True,
-                    use_audio_in_video=self.use_audio_in_video,
-                )
+            if self.use_omnivideo_text:
+                try:
+                    model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
+                except TypeError:
+                    model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             else:
-                # Standard Qwen2-VL style processing (no audio)
-                # Handle images
-                if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
-                    images = [process_image(image) for image in row_dict.get(self.image_key, [])]
-                    multi_modal_data["image"] = images
+                # Check if this is a Qwen3OmniMoeProcessor (has feature_extractor for audio)
+                is_qwen3_omni = hasattr(self.processor, 'feature_extractor') and self.processor.feature_extractor is not None
 
-                # Handle videos
-                if self.video_key in row_dict and row_dict.get(self.video_key, None) is not None:
-                    video_list = row_dict.get(self.video_key, [])
-                    videos = [process_video({"video": v} if isinstance(v, str) else v) for v in video_list]
-                    multi_modal_data["video"] = [video.numpy() for video in videos]
-                elif self.video_file_key in row_dict and row_dict.get(self.video_file_key, None) is not None:
-                    video_path = row_dict.get(self.video_file_key)
-                    videos = [process_video({"video": video_path})]
-                    multi_modal_data["video"] = [video.numpy() for video in videos]
+                if is_qwen3_omni:
+                    # Use official qwen_omni_utils.process_mm_info for Qwen3-Omni
+                    # This handles audio extraction from video automatically
+                    from qwen_omni_utils import process_mm_info
 
-                # Text-only (OmniVideoText): processor may not support images/videos kwargs
-                if images is None and videos is None:
-                    try:
-                        model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
-                    except TypeError:
-                        model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                    audios, images, videos = process_mm_info(
+                        messages,
+                        use_audio_in_video=self.use_audio_in_video,
+                    )
+
+                    # Store multi_modal_data for reference
+                    if images:
+                        multi_modal_data["image"] = images
+                    if videos:
+                        multi_modal_data["video"] = videos
+                    if audios:
+                        multi_modal_data["audio"] = audios
+
+                    # Use Qwen3-Omni processor with all modalities
+                    model_inputs = self.processor(
+                        text=[raw_prompt],
+                        audio=audios,
+                        images=images,
+                        videos=videos,
+                        return_tensors="pt",
+                        padding=True,
+                        use_audio_in_video=self.use_audio_in_video,
+                    )
                 else:
-                    model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+                    # Standard Qwen2-VL style processing (no audio)
+                    # Handle images
+                    if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
+                        images = [process_image(image) for image in row_dict.get(self.image_key, [])]
+                        multi_modal_data["image"] = images
+
+                    # Handle videos
+                    if self.video_key in row_dict and row_dict.get(self.video_key, None) is not None:
+                        video_list = row_dict.get(self.video_key, [])
+                        videos = [process_video({"video": v} if isinstance(v, str) else v) for v in video_list]
+                        multi_modal_data["video"] = [video.numpy() for video in videos]
+                    elif self.video_file_key in row_dict and row_dict.get(self.video_file_key, None) is not None:
+                        video_path = row_dict.get(self.video_file_key)
+                        videos = [process_video({"video": video_path})]
+                        multi_modal_data["video"] = [video.numpy() for video in videos]
+
+                    # Text-only (OmniVideoText): processor may not support images/videos kwargs
+                    if images is None and videos is None:
+                        try:
+                            model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
+                        except TypeError:
+                            model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                    else:
+                        model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
