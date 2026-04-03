@@ -347,6 +347,9 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self.omni_input_debug = os.environ.get("OMNI_INPUT_DEBUG", os.environ.get("TTRL_DEBUG", "0")) == "1"
+        self.omni_input_log_max_q_chars = int(os.environ.get("OMNI_INPUT_LOG_MAX_Q_CHARS", "200"))
+        self.omni_input_log_limit = int(os.environ.get("OMNI_INPUT_LOG_LIMIT", "0"))
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
@@ -665,6 +668,48 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _log_omni_batch_inputs(self, batch: DataProto, stage: str):
+        """Print per-sample Omni metadata (files/question/GT) to stdout when debug is enabled."""
+        if not self.omni_input_debug:
+            return
+
+        n_items = len(batch)
+        if n_items == 0:
+            return
+
+        n_to_log = n_items if self.omni_input_log_limit <= 0 else min(n_items, self.omni_input_log_limit)
+        print(f"[OMNI INPUT] {stage}: logging {n_to_log}/{n_items} samples", flush=True)
+
+        for i in range(n_to_log):
+            data_item = batch[i]
+            nb = data_item.non_tensor_batch
+
+            video_file = nb.get("video_file", "N/A")
+            audio_file = nb.get("audio_file", "N/A")
+            question_text = str(nb.get("question", "N/A"))
+            if len(question_text) > self.omni_input_log_max_q_chars:
+                question_text = question_text[: self.omni_input_log_max_q_chars] + "..."
+            sample_id = nb.get("id", nb.get("index", i))
+            source = nb.get("data_source", nb.get("source", "N/A"))
+
+            gt = "N/A"
+            original_gt = "N/A"
+            majority_gt = "N/A"
+            reward_model = nb.get("reward_model", None)
+            if isinstance(reward_model, dict):
+                gt = reward_model.get("ground_truth", "N/A")
+                original_gt = reward_model.get("original_gt", "N/A")
+                majority_gt = reward_model.get("majority_gt", "N/A")
+
+            print(
+                f"[OMNI INPUT] {stage} | idx={i}/{n_items} | id={sample_id} | source={source}"
+                f" | gt={gt} | original_gt={original_gt} | majority_gt={majority_gt}"
+                f"\n  video: {video_file}"
+                f"\n  audio: {audio_file}"
+                f"\n  question: {question_text}",
+                flush=True,
+            )
+
     def _validate(self):
         VAL_DEBUG = os.environ.get("VAL_DEBUG", "0") == "1"
         
@@ -686,6 +731,7 @@ class RayPPOTrainer:
             if val_max_batches is not None and batch_idx >= val_max_batches:
                 break
             test_batch = DataProto.from_single_dict(test_data)
+            self._log_omni_batch_inputs(test_batch, stage=f"val_step={self.global_steps}/batch={batch_idx}")
 
             # repeat test batch
             test_batch = test_batch.repeat(
@@ -1164,6 +1210,7 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                self._log_omni_batch_inputs(batch, stage=f"train_step={self.global_steps}")
 
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
 
@@ -1252,6 +1299,9 @@ class RayPPOTrainer:
                         batch.non_tensor_batch["uid"] = np.array(
                             [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                         )
+                        # Default repeat factor for standard PPO/GRPO rollout.
+                        # In TTRL mode this is overridden by n_samples_per_prompt below.
+                        repeat_times = self.config.actor_rollout_ref.rollout.n
                         if self.config.get("ttrl", {}).get("enable", False):
                             repeat_times = self.config.ttrl.n_samples_per_prompt
                         batch = batch.repeat(repeat_times=repeat_times, interleave=True)
@@ -1284,6 +1334,23 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+
+                        # Debug: reward signal diagnostics
+                        _r = reward_tensor if not self.config.reward_model.launch_reward_fn_async else None
+                        if _r is not None:
+                            _seq_scores = _r.sum(dim=-1)
+                            print(f"[TTRL_DEBUG] step={self.global_steps} REWARDS | "
+                                  f"seq_score: mean={_seq_scores.mean():.4f} std={_seq_scores.std():.4f} "
+                                  f"min={_seq_scores.min():.4f} max={_seq_scores.max():.4f} | "
+                                  f"frac_zero={(_seq_scores == 0).float().mean():.4f} "
+                                  f"frac_pos={(_seq_scores > 0).float().mean():.4f} "
+                                  f"frac_neg={(_seq_scores < 0).float().mean():.4f} | "
+                                  f"n_samples={_seq_scores.numel()}")
+                            if reward_extra_infos_dict:
+                                for k, v in reward_extra_infos_dict.items():
+                                    _v = np.array(v)
+                                    print(f"[TTRL_DEBUG] step={self.global_steps} reward_extra[{k}]: "
+                                          f"mean={_v.mean():.4f} unique={len(np.unique(_v))}")
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1375,6 +1442,36 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                        # Debug: advantage diagnostics
+                        _adv = batch.batch["advantages"]
+                        _rmask = batch.batch["response_mask"].bool()
+                        _valid_adv = _adv[_rmask]
+                        _returns = batch.batch["returns"]
+                        _valid_ret = _returns[_rmask]
+                        _tlr = batch.batch["token_level_rewards"]
+                        _seq_rew = _tlr.sum(dim=-1)
+                        print(f"[TTRL_DEBUG] step={self.global_steps} ADVANTAGES | "
+                              f"adv_estimator={self.config.algorithm.adv_estimator} | "
+                              f"valid_adv: mean={_valid_adv.mean():.6e} std={_valid_adv.std():.6e} "
+                              f"min={_valid_adv.min():.6e} max={_valid_adv.max():.6e} "
+                              f"all_zero={bool(_valid_adv.abs().sum() == 0)} "
+                              f"frac_zero={(_valid_adv == 0).float().mean():.4f} | "
+                              f"returns: mean={_valid_ret.mean():.6e} std={_valid_ret.std():.6e} | "
+                              f"token_rewards_per_seq: mean={_seq_rew.mean():.4f} std={_seq_rew.std():.4f} | "
+                              f"n_valid_tokens={_valid_adv.numel()} n_sequences={_adv.shape[0]}")
+                        # Per-prompt group variance check (are all samples for the same prompt identical?)
+                        n_repeat = self.config.actor_rollout_ref.rollout.n
+                        if self.config.get("ttrl", {}).get("enable", False):
+                            n_repeat = self.config.ttrl.n_samples_per_prompt
+                        if n_repeat > 1 and _seq_rew.numel() >= n_repeat:
+                            _grouped = _seq_rew.view(-1, n_repeat)
+                            _group_std = _grouped.std(dim=1)
+                            print(f"[TTRL_DEBUG] step={self.global_steps} REWARD VARIANCE per prompt group | "
+                                  f"group_std: mean={_group_std.mean():.6e} min={_group_std.min():.6e} "
+                                  f"max={_group_std.max():.6e} "
+                                  f"frac_all_same={(_group_std == 0).float().mean():.4f} "
+                                  f"(n_groups={_grouped.shape[0]}, n_per_group={n_repeat})")
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1384,12 +1481,20 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
+                        print(f"[TTRL_DEBUG] step={self.global_steps} ACTOR UPDATE ENABLED "
+                              f"(critic_warmup={self.config.trainer.critic_warmup})")
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        print(f"[TTRL_DEBUG] step={self.global_steps} ACTOR OUTPUT METRICS | "
+                              + " | ".join(f"{k}={v:.6e}" if isinstance(v, float) else f"{k}={v}"
+                                           for k, v in actor_output_metrics.items()))
                         metrics.update(actor_output_metrics)
+                    else:
+                        print(f"[TTRL_DEBUG] step={self.global_steps} ACTOR UPDATE SKIPPED "
+                              f"(critic_warmup={self.config.trainer.critic_warmup} > global_steps={self.global_steps})")
 
                     if self.config.get("ttrl", {}).get("enable", False):
                         from verl.trainer.ppo.ttrl_utils import apply_original_gt, compute_ttrl_metrics

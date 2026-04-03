@@ -107,6 +107,7 @@ class RLOMNIDataset(Dataset):
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.video_file_key = config.get("video_file_key", "video_file")  # For direct video paths
+        self.audio_file_key = config.get("audio_file_key", "audio_file")  # For direct audio paths (audio-only datasets)
         self.question_key = config.get("question_key", "question")  # For question text
         self.answer_key = config.get("answer_key", "answer")  # For ground truth answer
         self.max_prompt_length = config.get("max_prompt_length", 1024)
@@ -126,10 +127,18 @@ class RLOMNIDataset(Dataset):
         self.enable_thinking = config.get("enable_thinking", None)
         
         # Qwen3-Omni specific settings
-        self.use_audio_in_video = config.get("use_audio_in_video", True)  # Always True for AV reasoning
+        self.use_audio_in_video = config.get("use_audio_in_video", True)
         self.audio_sample_rate = config.get("audio_sample_rate", QWEN_OMNI_SAMPLE_RATE)
-        # If True, treat OmniVideo-style rows as question-only: ignore video_file / multimodal loading.
         self.use_omnivideo_text = config.get("use_omnivideo_text", False)
+
+        # Video downsampling knobs (passed through to qwen_omni_utils / qwen_vl_utils)
+        self.video_fps = config.get("video_fps", None)        # e.g. 1.0 (default in lib: 2.0)
+        self.video_max_frames = config.get("video_max_frames", None)  # e.g. 32  (default in lib: 768)
+        self.video_min_frames = config.get("video_min_frames", None)  # e.g. 4   (default in lib: 4)
+        self.video_max_pixels = config.get("video_max_pixels", None)  # per-frame max pixels
+
+        # Audio truncation: clip audio to at most this many seconds (None = full duration)
+        self.max_audio_duration = config.get("max_audio_duration", None)  # e.g. 30.0
         
         self._download()
         self._read_files_and_tokenize()
@@ -211,7 +220,7 @@ class RLOMNIDataset(Dataset):
 
             self.dataframe = self.dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
-                num_proc=self.num_workers,
+                num_proc=None,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
@@ -229,26 +238,50 @@ class RLOMNIDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
+    def _video_sampling_kwargs(self) -> dict:
+        """Return a dict of fps/frame/pixel overrides to inject into video content elements."""
+        kw = {}
+        if self.video_fps is not None:
+            kw["fps"] = self.video_fps
+        if self.video_max_frames is not None:
+            kw["max_frames"] = self.video_max_frames
+        if self.video_min_frames is not None:
+            kw["min_frames"] = self.video_min_frames
+        if self.video_max_pixels is not None:
+            kw["max_pixels"] = self.video_max_pixels
+        return kw
+
     def _build_messages(self, example: dict):
         """
         Build chat messages from example data.
         
-        Supports three formats:
+        Supports four formats:
         1. Standard format with 'prompt' key containing chat messages
-        2. OmniVideo format with 'question', 'video_file' keys (multimodal)
-        3. OmniVideoText format with 'question' only (text-only, no video/audio)
+        2. OmniVideo format with 'question', 'video_file' keys (video+audio multimodal)
+        3. Audio-only format with 'question', 'audio_file' keys (audio multimodal, no video)
+        4. OmniVideoText format with 'question' only (text-only, no video/audio)
         """
-        # Check if this is OmniVideo or OmniVideoText format (has question)
+        video_kw = self._video_sampling_kwargs()
+
+        # Check if this is OmniVideo / Audio-only / OmniVideoText format (has question)
         if self.question_key in example:
             question = example.get(self.question_key, "")
             video_file = example.get(self.video_file_key, "")
-            # OmniVideo: include video (content_list for multimodal processor)
+            audio_file = example.get(self.audio_file_key, "")
+
             if video_file and not self.use_omnivideo_text:
+                # OmniVideo: include video (content_list for multimodal processor)
+                video_elem = {"type": "video", "video": video_file, **video_kw}
                 content_list = [
-                    {"type": "video", "video": video_file},
-                    {"type": "text", "text": question}
-                    # {"type": "text", "text": question},
-                    # {"type": "video", "video": video_file}
+                    video_elem,
+                    {"type": "text", "text": question},
+                ]
+                messages = [{"role": "user", "content": content_list}]
+            elif audio_file and not self.use_omnivideo_text:
+                # Audio-only: include audio element for Qwen2.5-Omni processor
+                content_list = [
+                    {"type": "audio", "audio": audio_file},
+                    {"type": "text", "text": question},
                 ]
                 messages = [{"role": "user", "content": content_list}]
             else:
@@ -269,7 +302,7 @@ class RLOMNIDataset(Dataset):
                     if segment == "<image>":
                         content_list.append({"type": "image"})
                     elif segment == "<video>":
-                        content_list.append({"type": "video"})
+                        content_list.append({"type": "video", **video_kw})
                     else:
                         content_list.append({"type": "text", "text": segment})
 
@@ -319,8 +352,13 @@ class RLOMNIDataset(Dataset):
                 except TypeError:
                     model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             else:
-                # Check if this is a Qwen3OmniMoeProcessor (has feature_extractor for audio)
-                is_qwen3_omni = hasattr(self.processor, 'feature_extractor') and self.processor.feature_extractor is not None
+                # Qwen3OmniMoeProcessor has feature_extractor and uses qwen_omni_utils;
+                # Qwen2_5OmniProcessor also has feature_extractor but uses a different pipeline.
+                is_qwen3_omni = (
+                    "Qwen3Omni" in self.processor.__class__.__name__
+                    and hasattr(self.processor, 'feature_extractor')
+                    and self.processor.feature_extractor is not None
+                )
 
                 if is_qwen3_omni:
                     # Use official qwen_omni_utils.process_mm_info for Qwen3-Omni
@@ -331,6 +369,10 @@ class RLOMNIDataset(Dataset):
                         messages,
                         use_audio_in_video=self.use_audio_in_video,
                     )
+
+                    if audios and self.max_audio_duration is not None:
+                        max_samples = int(self.audio_sample_rate * self.max_audio_duration)
+                        audios = [a[:max_samples] for a in audios]
 
                     # Store multi_modal_data for reference
                     if images:
@@ -351,7 +393,7 @@ class RLOMNIDataset(Dataset):
                         use_audio_in_video=self.use_audio_in_video,
                     )
                 else:
-                    # Standard Qwen2-VL style processing (no audio)
+                    # Standard Qwen2-VL / Qwen2.5-Omni style processing
                     # Handle images
                     if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
                         images = [process_image(image) for image in row_dict.get(self.image_key, [])]
@@ -367,12 +409,30 @@ class RLOMNIDataset(Dataset):
                         videos = [process_video({"video": video_path})]
                         multi_modal_data["video"] = [video.numpy() for video in videos]
 
-                    # Text-only (OmniVideoText): processor may not support images/videos kwargs
-                    if images is None and videos is None:
+                    # Handle audio-only inputs (e.g. MMAU dataset)
+                    audio_file = row_dict.get(self.audio_file_key, None)
+                    if audio_file and images is None and videos is None:
+                        import librosa
+                        waveform, _ = librosa.load(audio_file, sr=self.audio_sample_rate)
+                        if self.max_audio_duration is not None:
+                            max_samples = int(self.audio_sample_rate * self.max_audio_duration)
+                            waveform = waveform[:max_samples]
+                        audios = [waveform]
+                        multi_modal_data["audio"] = audios
+
+                    # Route to correct processor call based on available modalities
+                    if images is None and videos is None and audios is None:
+                        # Text-only
                         try:
                             model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
                         except TypeError:
                             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                    elif audios is not None and images is None and videos is None:
+                        # Audio-only (Qwen2.5-Omni)
+                        model_inputs = self.processor(
+                            text=[raw_prompt], audio=audios, return_tensors="pt", padding=True,
+                            use_audio_in_video=False,
+                        )
                     else:
                         model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 

@@ -31,7 +31,8 @@ export ROCR_VISIBLE_DEVICES=
 export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-export RAY_TMPDIR="/data/sls/scratch/mvideet/ray_tmp/${SLURM_JOB_ID:-manual}"
+# Keep Ray temp path short; long absolute paths can exceed AF_UNIX socket limits.
+export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${USER}_${SLURM_JOB_ID:-manual}}"
 mkdir -p "$RAY_TMPDIR"
 
 
@@ -55,6 +56,29 @@ N_VOTES_PER_PROMPT=16
 N_SAMPLES_PER_PROMPT=4
 MINI_BATCH_SIZE=2
 MICRO_BATCH_SIZE=1
+
+# Training label mode:
+# - TRAIN_ON_GT_LABELS=1: train directly with dataset answers as ground truth (no TTRL relabeling).
+# - TRAIN_ON_GT_LABELS=0: original TTRL behavior (majority-voted pseudo labels).
+TRAIN_ON_GT_LABELS="${TRAIN_ON_GT_LABELS:-1}"
+if [[ "${TRAIN_ON_GT_LABELS}" != "0" ]]; then
+  TTRL_ENABLE=false
+  ROLLOUT_N="${ROLLOUT_N:-$N_SAMPLES_PER_PROMPT}"
+  TRAIN_MODE_DESC="ground-truth labels"
+else
+  TTRL_ENABLE=true
+  ROLLOUT_N="${ROLLOUT_N:-$N_VOTES_PER_PROMPT}"
+  TRAIN_MODE_DESC="TTRL majority-voted labels"
+fi
+
+# Validation cadence for performance tracking over time.
+VAL_N="${VAL_N:-1}"
+VAL_DO_SAMPLE="${VAL_DO_SAMPLE:-false}"
+VAL_TOP_P="${VAL_TOP_P:-0.95}"
+VAL_TEMPERATURE="${VAL_TEMPERATURE:-0.0}"
+TEST_FREQ="${TEST_FREQ:-2}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+AUDIO_SAMPLE_RATE="${AUDIO_SAMPLE_RATE:-16000}"
 
 
 
@@ -102,6 +126,9 @@ OUTPUT_DIR="/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-verl/${MODEL}/$
 # Re-export PYTHONPATH before run (conda/activate may clear it)
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
+echo "Training mode: ${TRAIN_MODE_DESC} (TRAIN_ON_GT_LABELS=${TRAIN_ON_GT_LABELS}, ttrl.enable=${TTRL_ENABLE}, rollout.n=${ROLLOUT_N})"
+echo "Validation: test_freq=${TEST_FREQ}, val_before_train=${VAL_BEFORE_TRAIN}, val_n=${VAL_N}, val_do_sample=${VAL_DO_SAMPLE}, val_temperature=${VAL_TEMPERATURE}"
+echo "Input rates: video_fps=${VIDEO_FPS:-1.0}, audio_sample_rate=${AUDIO_SAMPLE_RATE}"
 
 python -m verl.trainer.main_ppo \
   --config-name='ppo_trainer_ttrl.yaml' \
@@ -121,14 +148,17 @@ python -m verl.trainer.main_ppo \
   data.question_key='question' \
   data.answer_key='answer' \
   data.use_audio_in_video=True \
+  +data.video_fps=${VIDEO_FPS:-1.0} \
+  +data.video_max_frames=${VIDEO_MAX_FRAMES:-32} \
+  +data.audio_sample_rate=${AUDIO_SAMPLE_RATE} \
+  +data.max_audio_duration=${MAX_AUDIO_DURATION:-30.0} \
   actor_rollout_ref.model.path=$BACKBONE_PATH \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_activation_offload=True \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
-  actor_rollout_ref.actor.use_kl_loss=True \
-  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.use_kl_loss=False \
   actor_rollout_ref.actor.ppo_epochs=4 \
   actor_rollout_ref.actor.optim.lr=5e-7 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
@@ -149,12 +179,12 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.do_sample=True \
   actor_rollout_ref.rollout.top_p=0.95 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
-  actor_rollout_ref.rollout.n=$N_VOTES_PER_PROMPT \
+  actor_rollout_ref.rollout.n=$ROLLOUT_N \
   +actor_rollout_ref.rollout.num_return_sequences_batch_size=8 \
-  actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-  actor_rollout_ref.rollout.val_kwargs.n=4 \
-  actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-  actor_rollout_ref.rollout.val_kwargs.temperature=1 \
+  actor_rollout_ref.rollout.val_kwargs.do_sample=$VAL_DO_SAMPLE \
+  actor_rollout_ref.rollout.val_kwargs.n=$VAL_N \
+  actor_rollout_ref.rollout.val_kwargs.top_p=$VAL_TOP_P \
+  actor_rollout_ref.rollout.val_kwargs.temperature=$VAL_TEMPERATURE \
   critic.optim.lr=9e-6 \
   critic.model.use_remove_padding=True \
   critic.model.path=$BACKBONE_PATH \
@@ -168,7 +198,7 @@ python -m verl.trainer.main_ppo \
   algorithm.adv_estimator=$ADVANTAGE \
   custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_video_qa/__init__.py" \
   custom_reward_function.name=reward_func \
-  ttrl.enable=True \
+  ttrl.enable=$TTRL_ENABLE \
   ttrl.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   ttrl.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   trainer.logger=['console','wandb'] \
@@ -177,8 +207,8 @@ python -m verl.trainer.main_ppo \
   trainer.n_gpus_per_node=${N_GPUS:-4} \
   trainer.nnodes=${NNODES:-1} \
   trainer.save_freq=${SAVE_FREQ:-5} \
-  trainer.test_freq=-1 \
-  trainer.val_before_train=False \
+  trainer.test_freq=$TEST_FREQ \
+  trainer.val_before_train=$VAL_BEFORE_TRAIN \
   trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-3} \
   trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \

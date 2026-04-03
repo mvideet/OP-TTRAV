@@ -278,11 +278,17 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
 
+        rank = torch.distributed.get_rank()
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
+            print(f"WARN: rank {rank} grad_norm is not finite: {grad_norm}")
+            if rank == 0:
+                print(f"[TTRL_DEBUG] _optimizer_step SKIPPED (non-finite grad_norm={grad_norm.item():.6e})")
             self.actor_optimizer.zero_grad()
         else:
+            if rank == 0:
+                print(f"[TTRL_DEBUG] _optimizer_step EXECUTING optimizer.step() | "
+                      f"grad_norm={grad_norm.item():.6e} grad_clip={self.config.grad_clip}")
             self.actor_optimizer.step()
         return grad_norm
 
@@ -375,10 +381,68 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
 
+    def _debug_param_snapshot(self, tag=""):
+        """Capture a snapshot of parameter norms for change detection."""
+        snapshot = {}
+        for name, p in self.actor_module.named_parameters():
+            if p.requires_grad:
+                snapshot[name] = p.data.detach().float().norm().item()
+        return snapshot
+
+    def _debug_compare_params(self, before, after, tag=""):
+        """Compare param snapshots and report whether weights changed."""
+        rank = torch.distributed.get_rank()
+        if rank != 0:
+            return
+        changed, unchanged, total_delta = 0, 0, 0.0
+        for name in before:
+            if name in after:
+                delta = abs(after[name] - before[name])
+                total_delta += delta
+                if delta > 0:
+                    changed += 1
+                else:
+                    unchanged += 1
+        print(f"[TTRL_DEBUG] {tag} param change: {changed} changed, {unchanged} unchanged, "
+              f"total_delta={total_delta:.6e}")
+
+    def _debug_grad_stats(self, tag=""):
+        """Log gradient statistics across all parameters."""
+        rank = torch.distributed.get_rank()
+        if rank != 0:
+            return
+        total_params, params_with_grad, params_zero_grad = 0, 0, 0
+        grad_norms = []
+        max_grad_name, max_grad_val = "", 0.0
+        for name, p in self.actor_module.named_parameters():
+            if not p.requires_grad:
+                continue
+            total_params += 1
+            if p.grad is not None:
+                params_with_grad += 1
+                gn = p.grad.detach().float().norm().item()
+                grad_norms.append(gn)
+                if gn == 0.0:
+                    params_zero_grad += 1
+                if gn > max_grad_val:
+                    max_grad_val = gn
+                    max_grad_name = name
+        if grad_norms:
+            import statistics
+            print(f"[TTRL_DEBUG] {tag} grads: {params_with_grad}/{total_params} params have grad, "
+                  f"{params_zero_grad} with zero grad | "
+                  f"grad_norm mean={statistics.mean(grad_norms):.6e} max={max(grad_norms):.6e} "
+                  f"min={min(grad_norms):.6e} | max_param={max_grad_name}")
+        else:
+            print(f"[TTRL_DEBUG] {tag} grads: NO GRADIENTS on any of {total_params} params!")
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
+
+        rank = torch.distributed.get_rank()
+        param_snapshot_before = self._debug_param_snapshot("pre_update")
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
@@ -395,6 +459,20 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+
+        if rank == 0:
+            adv_all = data.batch["advantages"]
+            resp_mask = data.batch["response_mask"]
+            valid_adv = adv_all[resp_mask.bool()]
+            print(f"[TTRL_DEBUG] update_policy called | batch_size={len(data.batch)} | "
+                  f"advantages: mean={valid_adv.mean():.6e} std={valid_adv.std():.6e} "
+                  f"min={valid_adv.min():.6e} max={valid_adv.max():.6e} "
+                  f"frac_zero={((valid_adv == 0).float().mean()):.4f} "
+                  f"frac_pos={((valid_adv > 0).float().mean()):.4f} "
+                  f"frac_neg={((valid_adv < 0).float().mean()):.4f} "
+                  f"n_valid_tokens={valid_adv.numel()}")
+            old_lp = data.batch["old_log_probs"][resp_mask.bool()]
+            print(f"[TTRL_DEBUG] old_log_probs: mean={old_lp.mean():.6e} std={old_lp.std():.6e}")
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
@@ -534,7 +612,27 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
+
+                    if rank == 0:
+                        resp_m = data["response_mask"]
+                        valid_adv_mb = data["advantages"][resp_m.bool()]
+                        valid_old_lp = data["old_log_probs"][resp_m.bool()]
+                        valid_new_lp = log_prob[resp_m.bool()]
+                        ratio_mb = torch.exp(valid_new_lp - valid_old_lp)
+                        print(f"[TTRL_DEBUG] micro_batch ep={epoch} idx={batch_idx} | "
+                              f"pg_loss={pg_loss.item():.6e} policy_loss={policy_loss.item():.6e} "
+                              f"scaled_loss={loss.item():.6e} | "
+                              f"loss.requires_grad={loss.requires_grad} | "
+                              f"ppo_kl={ppo_kl.item():.6e} clipfrac={pg_clipfrac.item():.4f} | "
+                              f"ratio: mean={ratio_mb.mean():.6f} min={ratio_mb.min():.6f} max={ratio_mb.max():.6f} | "
+                              f"adv: mean={valid_adv_mb.mean():.6e} all_zero={bool(valid_adv_mb.abs().sum() == 0)} | "
+                              f"new_lp: mean={valid_new_lp.mean():.6e} old_lp: mean={valid_old_lp.mean():.6e} "
+                              f"active_tokens={resp_m.sum().item()}")
+
                     loss.backward()
+
+                    if rank == 0:
+                        self._debug_grad_stats(f"after_backward_ep{epoch}_idx{batch_idx}")
 
                     micro_batch_metrics.update(
                         {
@@ -547,7 +645,16 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
+
+                if rank == 0:
+                    print(f"[TTRL_DEBUG] optimizer_step ep={epoch} idx={batch_idx} | "
+                          f"grad_norm={grad_norm.item():.6e} finite={torch.isfinite(grad_norm).item()}")
+
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
+
+        param_snapshot_after = self._debug_param_snapshot("post_update")
+        self._debug_compare_params(param_snapshot_before, param_snapshot_after, "update_policy")
+
         return metrics
