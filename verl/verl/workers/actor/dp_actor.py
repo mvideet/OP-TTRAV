@@ -95,9 +95,35 @@ class DataParallelPPOActor(BasePPOActor):
                     multi_modal_inputs[key] = [inputs[key] for inputs in micro_batch["multi_modal_inputs"]]
             else:
                 for key in micro_batch["multi_modal_inputs"][0].keys():
-                    multi_modal_inputs[key] = torch.cat(
-                        [inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0
-                    )
+                    vals = [inputs[key] for inputs in micro_batch["multi_modal_inputs"]]
+                    if isinstance(vals[0], torch.Tensor):
+                        multi_modal_inputs[key] = torch.cat(vals, dim=0)
+                    else:
+                        # Non-tensor values (e.g. use_audio_in_video bool) — take first
+                        multi_modal_inputs[key] = vals[0]
+
+        # --- Multimodal RL diagnostic (rank 0, first call only) ---
+        if not getattr(self, "_mm_diag_logged", False) and torch.distributed.get_rank() == 0:
+            self._mm_diag_logged = True
+            mm_tensor_keys = [k for k, v in multi_modal_inputs.items() if isinstance(v, torch.Tensor)]
+            mm_other_keys = [k for k, v in multi_modal_inputs.items() if not isinstance(v, torch.Tensor)]
+            pos = micro_batch["position_ids"]
+            ids = micro_batch["input_ids"]
+            print(f"[MM_DIAG] _forward_micro_batch | "
+                  f"mm_tensor_keys={mm_tensor_keys} mm_other_keys={mm_other_keys} | "
+                  f"position_ids shape={pos.shape} dim={pos.dim()} | "
+                  f"input_ids shape={ids.shape} | "
+                  f"use_remove_padding={self.use_remove_padding}")
+            for k in mm_tensor_keys:
+                t = multi_modal_inputs[k]
+                print(f"[MM_DIAG]   {k}: shape={t.shape} dtype={t.dtype}")
+            # WARN: batch dimension mismatch when use_remove_padding + multimodal
+            if self.use_remove_padding and mm_tensor_keys:
+                print(f"[MM_DIAG] *** WARNING: use_remove_padding=True with multimodal tensors! "
+                      f"After unpadding, input_ids will be (1, total_nnz) but multimodal "
+                      f"features stay (batch={ids.shape[0]}, ...). This causes a batch "
+                      f"dimension mismatch in the model's multimodal embedding replacement. "
+                      f"Consider setting use_remove_padding=False for multimodal training. ***")
 
         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -538,7 +564,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 data[k] = v.to(get_device_id())
                             elif k == "multi_modal_inputs" and v is not None:
                                 data[k] = [
-                                    {kk: vv.to(get_device_id()) for kk, vv in item_dict.items()} for item_dict in v
+                                    {kk: vv.to(get_device_id()) if isinstance(vv, torch.Tensor) else vv
+                                     for kk, vv in item_dict.items()}
+                                    for item_dict in v
                                 ]
                             else:
                                 data[k] = v

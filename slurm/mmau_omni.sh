@@ -4,6 +4,7 @@
 #SBATCH -e slurm/err/mmau_omni_%j.err
 #SBATCH --qos=regular
 #SBATCH --partition=a6
+#SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
@@ -27,8 +28,8 @@ export TRAIN_ON_GT_LABELS=0
 export AUDIO_SAMPLE_RATE=16000
 
 # Eval every 2 steps + baseline before training
-export TEST_FREQ=2
-export VAL_BEFORE_TRAIN=true
+export TEST_FREQ=-1
+export VAL_BEFORE_TRAIN=false
 export VAL_DO_SAMPLE=false
 export VAL_N=1
 

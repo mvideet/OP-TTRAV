@@ -409,14 +409,26 @@ class RLOMNIDataset(Dataset):
                         videos = [process_video({"video": video_path})]
                         multi_modal_data["video"] = [video.numpy() for video in videos]
 
-                    # Handle audio-only inputs (e.g. MMAU dataset)
+                    # Handle audio inputs: use audio_file if available,
+                    # otherwise extract audio from video .mp4 directly
                     audio_file = row_dict.get(self.audio_file_key, None)
-                    if audio_file and images is None and videos is None:
+                    if not audio_file and videos is not None and self.use_audio_in_video:
+                        # Fall back to extracting audio from the video file
+                        video_path = row_dict.get(self.video_file_key, None)
+                        if video_path:
+                            audio_file = video_path
+                    if audio_file:
                         import librosa
                         waveform, _ = librosa.load(audio_file, sr=self.audio_sample_rate)
                         if self.max_audio_duration is not None:
                             max_samples = int(self.audio_sample_rate * self.max_audio_duration)
                             waveform = waveform[:max_samples]
+                        # Pad very short audio to avoid avg_pool1d crash in audio_tower
+                        # (needs at least ~0.5s for Whisper feature extraction + pooling)
+                        min_samples = int(self.audio_sample_rate * 1.0)
+                        if len(waveform) < min_samples:
+                            import numpy as _np
+                            waveform = _np.pad(waveform, (0, min_samples - len(waveform)))
                         audios = [waveform]
                         multi_modal_data["audio"] = audios
 
@@ -427,8 +439,15 @@ class RLOMNIDataset(Dataset):
                             model_inputs = self.processor(text=[raw_prompt], return_tensors="pt", padding=True)
                         except TypeError:
                             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                    elif audios is not None and videos is not None:
+                        # Video + audio (OmniVideo with use_audio_in_video)
+                        model_inputs = self.processor(
+                            text=[raw_prompt], videos=videos, audio=audios,
+                            return_tensors="pt", padding=True,
+                            use_audio_in_video=self.use_audio_in_video,
+                        )
                     elif audios is not None and images is None and videos is None:
-                        # Audio-only (Qwen2.5-Omni)
+                        # Audio-only (Qwen2.5-Omni / MMAU)
                         model_inputs = self.processor(
                             text=[raw_prompt], audio=audios, return_tensors="pt", padding=True,
                             use_audio_in_video=False,
@@ -438,6 +457,15 @@ class RLOMNIDataset(Dataset):
 
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
+
+            # Diagnostic: confirm which modalities the processor produced
+            import os as _os
+            if _os.environ.get("OMNI_INPUT_DEBUG") == "1":
+                _mm_keys = {k: (v.shape if hasattr(v, 'shape') else type(v).__name__) for k, v in model_inputs.items()}
+                _has_vid = any('video' in k or 'pixel_values_video' in k for k in model_inputs)
+                _has_aud = any('input_features' in k or 'feature_attention_mask' in k for k in model_inputs)
+                print(f"[MM_VERIFY] id={row_dict.get('id','?')} | video={_has_vid} audio={_has_aud} | "
+                      f"input_ids={input_ids.shape} | processor_keys={_mm_keys}")
 
             # Preserve second_per_grid_ts and feature_attention_mask for M-RoPE computation
             second_per_grid_ts = model_inputs.pop("second_per_grid_ts", None)

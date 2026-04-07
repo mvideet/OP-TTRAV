@@ -1218,8 +1218,9 @@ class RayPPOTrainer:
 
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
-                if "multi_modal_inputs" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("multi_modal_inputs")
+                # NOTE: multi_modal_inputs must NOT be popped from batch — they are
+                # needed for the training forward pass (old_log_probs, actor update).
+                # We copy them to gen_batch instead.
                 if "raw_prompt" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
                 if "tools_kwargs" in batch.non_tensor_batch:
@@ -1232,6 +1233,9 @@ class RayPPOTrainer:
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
+                # Copy multi_modal_inputs to gen_batch (keep in batch for training)
+                if "multi_modal_inputs" in batch.non_tensor_batch:
+                    gen_batch.non_tensor_batch["multi_modal_inputs"] = batch.non_tensor_batch["multi_modal_inputs"]
 
                 # Log max/mean/min prompt length once (first batch) for debugging / sanity check
                 if self.global_steps == 0 and "attention_mask" in gen_batch.batch:
@@ -1311,6 +1315,19 @@ class RayPPOTrainer:
                         n_per_prompt = self.config.ttrl.n_samples_per_prompt
                         batch.non_tensor_batch["index"] = np.arange(len(batch), dtype=np.int64) // n_per_prompt
 
+                    # Sanity check: print first 2 generated responses per step
+                    if self.global_steps <= 3 or self.global_steps % 20 == 0:
+                        _n_show = min(2, len(batch))
+                        for _si in range(_n_show):
+                            _resp_ids = batch.batch["responses"][_si]
+                            _resp_mask = batch.batch["response_mask"][_si].bool() if "response_mask" in batch.batch else None
+                            _resp_text = self.tokenizer.decode(_resp_ids[_resp_mask] if _resp_mask is not None else _resp_ids, skip_special_tokens=True)
+                            _gt = batch.non_tensor_batch.get("reward_model", [{}] * len(batch))[_si]
+                            _gt_ans = _gt.get("ground_truth", "?") if isinstance(_gt, dict) else "?"
+                            print(f"[ROLLOUT_SANITY] step={self.global_steps} sample={_si} | "
+                                  f"gt={_gt_ans} | resp_len={_resp_ids.numel()} | "
+                                  f"response={_resp_text[:300]}")
+
                     if "response_mask" not in batch.batch:
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1364,6 +1381,22 @@ class RayPPOTrainer:
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
+                        # MM_DIAG: verify multimodal features reach training forward
+                        _old_lp = batch.batch["old_log_probs"]
+                        _rmask = batch.batch["response_mask"]
+                        _valid_lp = _old_lp[_rmask.bool()]
+                        _has_mm = "multi_modal_inputs" in batch.non_tensor_batch
+                        _mm_keys = []
+                        if _has_mm:
+                            _sample_mm = batch.non_tensor_batch["multi_modal_inputs"][0]
+                            _mm_keys = [k for k in _sample_mm.keys() if isinstance(_sample_mm.get(k), torch.Tensor)] if hasattr(_sample_mm, 'keys') else []
+                        print(f"[MM_DIAG] step={self.global_steps} old_log_probs: "
+                              f"mean={_valid_lp.mean():.4f} std={_valid_lp.std():.4f} "
+                              f"min={_valid_lp.min():.4f} max={_valid_lp.max():.4f} | "
+                              f"entropy={entropy_agg.item():.4f} | "
+                              f"has_mm_inputs={_has_mm} mm_tensor_keys={_mm_keys} | "
+                              f"pos_ids_dim={batch.batch['position_ids'].dim()}")
+
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
                             rollout_old_log_probs = batch.batch["rollout_log_probs"]
@@ -1415,6 +1448,12 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            for k, v in reward_extra_infos_dict.items():
+                                try:
+                                    _vals = np.asarray(v, dtype=np.float64)
+                                    metrics[f"reward/{k}/mean"] = float(_vals.mean())
+                                except (TypeError, ValueError):
+                                    pass
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
@@ -1471,6 +1510,26 @@ class RayPPOTrainer:
                                   f"max={_group_std.max():.6e} "
                                   f"frac_all_same={(_group_std == 0).float().mean():.4f} "
                                   f"(n_groups={_grouped.shape[0]}, n_per_group={n_repeat})")
+
+                        # GRPO health: per-prompt accuracy and zero-variance detection
+                        if "index" in batch.non_tensor_batch:
+                            _idx = batch.non_tensor_batch["index"]
+                            _unique_prompts = np.unique(_idx)
+                            _n_prompts = len(_unique_prompts)
+                            _zero_var_prompts = 0
+                            _prompt_accs = []
+                            for _pid in _unique_prompts:
+                                _mask = _idx == _pid
+                                _group_rewards = _seq_rew[_mask]
+                                if _group_rewards.std() < 1e-8:
+                                    _zero_var_prompts += 1
+                                _prompt_accs.append((_group_rewards > 0).float().mean().item())
+                            print(f"[MM_DIAG] step={self.global_steps} GRPO_HEALTH | "
+                                  f"n_prompts={_n_prompts} "
+                                  f"zero_variance_groups={_zero_var_prompts}/{_n_prompts} "
+                                  f"({_zero_var_prompts/_n_prompts*100:.0f}% → no gradient) | "
+                                  f"per_prompt_acc: mean={np.mean(_prompt_accs):.3f} "
+                                  f"min={np.min(_prompt_accs):.3f} max={np.max(_prompt_accs):.3f}")
 
                     # update critic
                     if self.use_critic:

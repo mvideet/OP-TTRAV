@@ -467,6 +467,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
+        # Freeze vision/audio towers for Qwen2.5-Omni after FSDP wrapping.
+        # We wrap their forward() in torch.no_grad() so no activations are stored
+        # for backward. This must happen AFTER FSDP init because FSDP replaces
+        # parameter objects, making requires_grad_(False) before wrapping ineffective.
+        if model_type == "qwen2_5_omni":
+            def _freeze_tower_forward(tower, tower_name):
+                """Wrap a module's forward in torch.no_grad() to prevent activation storage."""
+                _orig_forward = tower.forward
+                def _frozen_forward(*args, **kwargs):
+                    with torch.no_grad():
+                        return _orig_forward(*args, **kwargs)
+                tower.forward = _frozen_forward
+                n_params = sum(p.numel() for p in tower.parameters()) / 1e6
+                if self.rank == 0:
+                    print(f"[FREEZE] Froze {tower_name} forward (no_grad wrapper, {n_params:.0f}M params)")
+
+            # Navigate through FSDP wrapper to find the towers
+            _inner = actor_module_fsdp
+            while hasattr(_inner, '_fsdp_wrapped_module'):
+                _inner = _inner._fsdp_wrapped_module
+            for tower_name in ("visual", "audio_tower"):
+                tower = getattr(_inner, tower_name, None)
+                if tower is not None:
+                    _freeze_tower_forward(tower, tower_name)
+
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup

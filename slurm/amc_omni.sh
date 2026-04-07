@@ -44,5 +44,7 @@ mkdir -p "$RAY_TMPDIR"
 
 export N_GPUS=4
 export NNODES=1
+export TEST_FREQ=-1
+export VAL_BEFORE_TRAIN=false
 
-bash verl/examples/ttrl/Qwen2.5-Omni/amc.sh "$@"
+bash verl/examples/ttrl/Qwen2.5-Omni/amc_omni.sh "$@"

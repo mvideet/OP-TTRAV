@@ -60,9 +60,12 @@ class DataParallelPPOCritic(BasePPOCritic):
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
             for key in micro_batch["multi_modal_inputs"][0].keys():
-                multi_modal_inputs[key] = torch.cat(
-                    [inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0
-                )
+                vals = [inputs[key] for inputs in micro_batch["multi_modal_inputs"]]
+                if isinstance(vals[0], torch.Tensor):
+                    multi_modal_inputs[key] = torch.cat(vals, dim=0)
+                else:
+                    # Non-tensor values (e.g. use_audio_in_video bool) — take first
+                    multi_modal_inputs[key] = vals[0]
 
         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]

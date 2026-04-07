@@ -50,11 +50,11 @@ MAX_RESPONSE_LENGTH=512
 
 # MINI_BATCH_SIZE * N_VOTES_PER_PROMPT must be >= n_gpus (e.g. 4)
 # OOM fix: MICRO_BATCH_SIZE=1 and N_VOTES_PER_PROMPT=8 reduce peak memory for 10k-token sequences.
-EPISODE=10
+EPISODE="${EPISODE:-10}"
 DATA_TRAIN_BATCH_SIZE=4
 N_VOTES_PER_PROMPT=16
 N_SAMPLES_PER_PROMPT=4
-MINI_BATCH_SIZE=2
+MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
 
 # Training label mode:
@@ -159,9 +159,9 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.actor.use_kl_loss=False \
-  actor_rollout_ref.actor.ppo_epochs=4 \
-  actor_rollout_ref.actor.optim.lr=5e-7 \
-  actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
+  actor_rollout_ref.actor.ppo_epochs=1 \
+  actor_rollout_ref.actor.optim.lr=2e-6 \
+  actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.005 \
   actor_rollout_ref.actor.optim.warmup_style='cosine' \
   actor_rollout_ref.actor.fsdp_config.param_offload=True \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -206,10 +206,10 @@ python -m verl.trainer.main_ppo \
   trainer.experiment_name=$LOG_NAME \
   trainer.n_gpus_per_node=${N_GPUS:-4} \
   trainer.nnodes=${NNODES:-1} \
-  trainer.save_freq=${SAVE_FREQ:-5} \
+  trainer.save_freq=${SAVE_FREQ:-20} \
   trainer.test_freq=$TEST_FREQ \
   trainer.val_before_train=$VAL_BEFORE_TRAIN \
-  trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-3} \
+  trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-0} \
   trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"
