@@ -76,16 +76,17 @@ DATA_LOCAL_DIR="${REPO_ROOT}/verl/data/${TASK}"
 BACKBONE_PATH="/data/sls/scratch/mvideet/models/${BACKBONE}"
 
 N_GPUS="${N_GPUS:-4}"
-# TTRL: train on the test set itself (uses majority voting, not GT labels)
+# TTRL: train on the full test set itself (majority voting, not GT labels)
+# Validation on a small 20-sample subset for periodic monitoring
 TRAIN_FILES="${DATA_LOCAL_DIR}/test_mini.json"
-VAL_FILES="${DATA_LOCAL_DIR}/test_mini.json"
+VAL_FILES="${DATA_LOCAL_DIR}/test_mini_val20.json"
 
 MODEL="${TASK}-${BACKBONE}"
 EXPERIMENT="TTRL-MMAU"
 
 WANDB_PROJECT="TTRL-verl"
 LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
-OUTPUT_DIR="/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-verl/${MODEL}/${DATE}/${EXPERIMENT}-${ADVANTAGE}-${TIME_TAG}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-verl/${MODEL}/${DATE}/${EXPERIMENT}-${ADVANTAGE}-${TIME_TAG}}"
 
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
@@ -137,7 +138,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
   actor_rollout_ref.rollout.name=hf \
   actor_rollout_ref.rollout.micro_batch_size=8 \
-  actor_rollout_ref.rollout.temperature=1 \
+  actor_rollout_ref.rollout.temperature=0.6 \
   actor_rollout_ref.rollout.do_sample=True \
   actor_rollout_ref.rollout.top_p=0.95 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
@@ -171,7 +172,7 @@ python -m verl.trainer.main_ppo \
   trainer.save_freq=${SAVE_FREQ:-20} \
   trainer.test_freq=$TEST_FREQ \
   trainer.val_before_train=$VAL_BEFORE_TRAIN \
-  trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-0} \
+  trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-1} \
   trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"

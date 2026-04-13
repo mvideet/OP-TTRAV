@@ -1365,9 +1365,17 @@ class RayPPOTrainer:
                                   f"n_samples={_seq_scores.numel()}")
                             if reward_extra_infos_dict:
                                 for k, v in reward_extra_infos_dict.items():
-                                    _v = np.array(v)
+                                    _v = np.array(v, dtype=object)
+                                    try:
+                                        _mean = f"{np.asarray(v, dtype=np.float64).mean():.4f}"
+                                    except (TypeError, ValueError):
+                                        _mean = "n/a"
+                                    try:
+                                        _unique = len(np.unique(_v))
+                                    except Exception:
+                                        _unique = len({repr(x) for x in v})
                                     print(f"[TTRL_DEBUG] step={self.global_steps} reward_extra[{k}]: "
-                                          f"mean={_v.mean():.4f} unique={len(np.unique(_v))}")
+                                          f"mean={_mean} unique={_unique}")
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):

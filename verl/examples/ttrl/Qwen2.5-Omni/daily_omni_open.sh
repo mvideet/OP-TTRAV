@@ -1,22 +1,35 @@
 #!/bin/bash
-# TTRL fine-tuning of Qwen2.5-Omni model on OmniVideo dataset
+# Open-ended TTRL fine-tuning of Qwen2.5-Omni on the OmniVideo dataset.
+#
+# Differences vs daily_omni.sh (the MCQ baseline):
+#   * TTRL_TASK_TYPE=open_ended_video         (semantic medoid voting)
+#   * Reward function points to ttrl_open_ended (BGE-small cosine similarity)
+#   * Trains on train_open.json (MCQ options stripped from question text)
+#   * answer_key=answer_text                  (option text used as reference for label_accuracy)
+#   * suffix_prompt asks for free-form 1-3 sentence answer (no \boxed{})
+#   * kl_coef=0.005                            (anchor against base policy to resist mode collapse)
+#   * temperature 0.7                          (higher floor to maintain rollout diversity)
+#
+# The original daily_omni.sh and the MCQ pathway are unchanged.
 
 # ------------------------------------------------------------
-# Environment Setup (aligned with slurm/aime.sh)
+# Environment Setup
 # ------------------------------------------------------------
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
-# HF rollout uses the FSDP actor directly - no vLLM, no FlashInfer JIT needed
-# expandable_segments reduces memory fragmentation during FSDP + generation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Video QA: use ttrl_video_qa extract_answer/grade
-export TTRL_TASK_TYPE=video_qa
+# Open-ended video QA: use ttrl_open_ended extract_answer/grade and the
+# embedding-medoid voting path inside ttrl_utils.apply_ttrl_gt.
+export TTRL_TASK_TYPE=open_ended_video
 export HF_DATASETS_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
 
-# Resolve repo root; fallback when script has no path (e.g. run as "daily_omni.sh" from TTRL)
+# Optional: extra debug from the open-ended voting / reward modules.
+export TTRL_OE_DEBUG="${TTRL_OE_DEBUG:-1}"
+
+# Resolve repo root
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
 if [[ ! -d "${REPO_ROOT}/verl/verl" && -n "${SLURM_SUBMIT_DIR}" && -d "${SLURM_SUBMIT_DIR}/verl/verl" ]]; then
@@ -31,10 +44,8 @@ export ROCR_VISIBLE_DEVICES=
 export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-# Keep Ray temp path short; long absolute paths can exceed AF_UNIX socket limits.
 export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${USER}_${SLURM_JOB_ID:-manual}}"
 mkdir -p "$RAY_TMPDIR"
-
 
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
@@ -43,13 +54,9 @@ TASK="OmniVideo"
 BACKBONE="Qwen2.5-Omni-3B"
 ADVANTAGE="grpo"
 
-# Omni-specific: large prompt lengths due to video/audio tokens (input is ~10k)
 MAX_PROMPT_LENGTH=10000
-# Reasoning chain + final \boxed{} answer; 512 tokens gives room for step-by-step CoT
 MAX_RESPONSE_LENGTH=512
 
-# MINI_BATCH_SIZE * N_VOTES_PER_PROMPT must be >= n_gpus (e.g. 4)
-# OOM fix: MICRO_BATCH_SIZE=1 and N_VOTES_PER_PROMPT=8 reduce peak memory for 10k-token sequences.
 EPISODE="${EPISODE:-10}"
 DATA_TRAIN_BATCH_SIZE=4
 N_VOTES_PER_PROMPT=16
@@ -57,77 +64,47 @@ N_SAMPLES_PER_PROMPT=4
 MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
 
-# Training label mode:
-# - TRAIN_ON_GT_LABELS=1: train directly with dataset answers as ground truth (no TTRL relabeling).
-# - TRAIN_ON_GT_LABELS=0: original TTRL behavior (majority-voted pseudo labels).
-TRAIN_ON_GT_LABELS="${TRAIN_ON_GT_LABELS:-1}"
-if [[ "${TRAIN_ON_GT_LABELS}" != "0" ]]; then
-  TTRL_ENABLE=false
-  ROLLOUT_N="${ROLLOUT_N:-$N_SAMPLES_PER_PROMPT}"
-  TRAIN_MODE_DESC="ground-truth labels"
-else
-  TTRL_ENABLE=true
-  ROLLOUT_N="${ROLLOUT_N:-$N_VOTES_PER_PROMPT}"
-  TRAIN_MODE_DESC="TTRL majority-voted labels"
-fi
+# Open-ended TTRL is always majority-voted (no GT labels), so we ignore the
+# TRAIN_ON_GT_LABELS toggle that the MCQ scripts use.
+TTRL_ENABLE=true
+ROLLOUT_N="${ROLLOUT_N:-$N_VOTES_PER_PROMPT}"
+TRAIN_MODE_DESC="open-ended TTRL (semantic medoid)"
 
-# Validation cadence for performance tracking over time.
 VAL_N="${VAL_N:-1}"
 VAL_DO_SAMPLE="${VAL_DO_SAMPLE:-false}"
 VAL_TOP_P="${VAL_TOP_P:-0.95}"
 VAL_TEMPERATURE="${VAL_TEMPERATURE:-0.0}"
-TEST_FREQ="${TEST_FREQ:-2}"
+TEST_FREQ="${TEST_FREQ:-5}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 AUDIO_SAMPLE_RATE="${AUDIO_SAMPLE_RATE:-16000}"
-
-
-
-# Memory reduction for large input sequences (~10k tokens):
-# - entropy_from_logits_with_chunking=True reduces entropy peak memory
-# - use_dynamic_bsz=True packs variable-length sequences more efficiently
-# - param_offload + optimizer_offload keeps GPU free between actor/rollout phases
 
 DATA_LOCAL_DIR="${REPO_ROOT}/verl/data/${TASK}"
 BACKBONE_PATH="/data/sls/scratch/mvideet/models/${BACKBONE}"
 
-# Sanity check: randomly sample N total. Set CONTENT_PARENT_CATEGORY to restrict to one category (e.g. Education).
-# Run with: SANITY_CHECK=1 ./daily_omni.sh  (or export SANITY_CHECK=1)
-# If CONTENT_PARENT_CATEGORY is unset/empty: sample N_SANITY from all categories. If set: filter to that category then sample.
-N_SANITY="${N_SANITY:-40}"
 N_GPUS="${N_GPUS:-4}"
+
+# Sanity flag: SANITY_CHECK=1 ./daily_omni_open.sh -> 40-sample subset, both train and val.
+N_SANITY="${N_SANITY:-40}"
 if [[ -n "${SANITY_CHECK}" && "${SANITY_CHECK}" != "0" ]]; then
-  SANITY_DIR="${DATA_LOCAL_DIR}"
-  CAT_ARGS=()
-  [[ -n "${CONTENT_PARENT_CATEGORY}" ]] && CAT_ARGS=(--content-parent-category "${CONTENT_PARENT_CATEGORY}")
-  python "${REPO_ROOT}/verl/data/${TASK}/sample_by_category.py" \
-    --train "${DATA_LOCAL_DIR}/train.json" \
-    --test "${DATA_LOCAL_DIR}/test.json" \
-    --out-dir "${SANITY_DIR}" \
-    --n-total "${N_SANITY}" \
-    "${CAT_ARGS[@]}" \
-    --suffix sanity
-  TRAIN_FILES="${SANITY_DIR}/train_sanity.json"
-  VAL_FILES="${SANITY_DIR}/test_sanity.json"
-  # Batch size must be divisible by n_gpus for DataProto.chunk() in rollout
+  TRAIN_FILES="${DATA_LOCAL_DIR}/train_open_sanity.json"
+  VAL_FILES="${DATA_LOCAL_DIR}/test_open_sanity.json"
   DATA_TRAIN_BATCH_SIZE=$(( (DATA_TRAIN_BATCH_SIZE + N_GPUS - 1) / N_GPUS * N_GPUS ))
-  CAT_DESC="${CONTENT_PARENT_CATEGORY:-all categories}"
-  echo "Sanity check: using ${TRAIN_FILES} and ${VAL_FILES} (content_parent_category=${CAT_DESC}, n_total=${N_SANITY}, train_batch_size=${DATA_TRAIN_BATCH_SIZE})"
+  echo "Sanity check: using ${TRAIN_FILES} and ${VAL_FILES} (n=${N_SANITY}, train_batch_size=${DATA_TRAIN_BATCH_SIZE})"
 else
-  TRAIN_FILES="${DATA_LOCAL_DIR}/train.json"
-  # Validation on 20-sample subset for periodic monitoring
-  VAL_FILES="${DATA_LOCAL_DIR}/test_val20.json"
+  TRAIN_FILES="${DATA_LOCAL_DIR}/train_open.json"
+  VAL_FILES="${DATA_LOCAL_DIR}/test_open_val20.json"
 fi
 
 MODEL="${TASK}-${BACKBONE}"
-EXPERIMENT="TTRL-Omni"
+EXPERIMENT="TTRL-Omni-Open"
 
 WANDB_PROJECT="TTRL-verl"
 LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
 OUTPUT_DIR="${OUTPUT_DIR:-/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-verl/${MODEL}/${DATE}/${EXPERIMENT}-${ADVANTAGE}-${TIME_TAG}}"
-# Re-export PYTHONPATH before run (conda/activate may clear it)
+
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
-echo "Training mode: ${TRAIN_MODE_DESC} (TRAIN_ON_GT_LABELS=${TRAIN_ON_GT_LABELS}, ttrl.enable=${TTRL_ENABLE}, rollout.n=${ROLLOUT_N})"
+echo "Training mode: ${TRAIN_MODE_DESC} (TTRL_TASK_TYPE=${TTRL_TASK_TYPE}, ttrl.enable=${TTRL_ENABLE}, rollout.n=${ROLLOUT_N})"
 echo "Validation: test_freq=${TEST_FREQ}, val_before_train=${VAL_BEFORE_TRAIN}, val_n=${VAL_N}, val_do_sample=${VAL_DO_SAMPLE}, val_temperature=${VAL_TEMPERATURE}"
 echo "Input rates: video_fps=${VIDEO_FPS:-1.0}, audio_sample_rate=${AUDIO_SAMPLE_RATE}"
 
@@ -141,13 +118,13 @@ python -m verl.trainer.main_ppo \
   data.val_batch_size=8 \
   data.filter_overlong_prompts=False \
   data.truncation='error' \
-  +data.suffix_prompt='"\nExplain your reasoning step by step in detail, then give your final answer as exactly one of: \\boxed{A}, \\boxed{B}, \\boxed{C}, or \\boxed{D}."' \
+  +data.suffix_prompt='"\nExplain your reasoning step by step, then give a concise answer to the question in 1-3 complete sentences."' \
   +data.collate_fn=verl.utils.dataset.collate_fn.default_collate_fn \
   data.trust_remote_code=True \
   data.use_qwen2_5_omni=True \
   data.video_file_key='video_file' \
   data.question_key='question' \
-  data.answer_key='answer' \
+  data.answer_key='answer_text' \
   data.use_audio_in_video=True \
   +data.video_fps=${VIDEO_FPS:-1.0} \
   +data.video_max_frames=${VIDEO_MAX_FRAMES:-32} \
@@ -197,7 +174,7 @@ python -m verl.trainer.main_ppo \
   critic.use_dynamic_bsz=True \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_video_qa/__init__.py" \
+  custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_open_ended/__init__.py" \
   custom_reward_function.name=reward_func \
   ttrl.enable=$TTRL_ENABLE \
   ttrl.n_votes_per_prompt=$N_VOTES_PER_PROMPT \

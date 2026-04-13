@@ -31,6 +31,15 @@ if TTRL_TASK_TYPE == "video_qa":
     def simplify_expression_string(s):
         return s if s else ""
     print(f"[TTRL] Using ttrl_video_qa extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
+elif TTRL_TASK_TYPE == "open_ended_video":
+    # Open-ended TTRL: extract_answer is identity, grade is semantic similarity.
+    # These are imported for compatibility but the open-ended path bypasses
+    # _majority_vote entirely (apply_ttrl_gt routes to apply_ttrl_open_ended_gt
+    # which uses embedding-based medoid voting instead of string-counting).
+    from verl.utils.reward_score.ttrl_open_ended import extract_answer, grade
+    def simplify_expression_string(s):
+        return s if s else ""
+    print(f"[TTRL] Using ttrl_open_ended extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
 else:
     from verl.utils.reward_score.ttrl_math import extract_answer, simplify_expression_string, grade
     print(f"[TTRL] Using ttrl_math extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
@@ -68,7 +77,17 @@ def apply_original_gt(batch):
 def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer):
     """
     Apply the majority vote ground truth to the batch.
+
+    Dispatch:
+      * TTRL_TASK_TYPE=open_ended_video -> embedding-medoid voting
+        (verl.trainer.ppo.ttrl_open_ended_vote.apply_ttrl_open_ended_gt)
+      * everything else                  -> string-counting majority voting
+        (the original implementation below; preserved unchanged for MCQ flows)
     """
+    if TTRL_TASK_TYPE == "open_ended_video":
+        from verl.trainer.ppo.ttrl_open_ended_vote import apply_ttrl_open_ended_gt
+        return apply_ttrl_open_ended_gt(batch, gen_batch_output, n, tokenizer)
+
     assert len(gen_batch_output) % n == 0, "gen_batch_output length must be divisible by n"
     num_prompts = len(gen_batch_output) // n
     assert len(batch) == num_prompts, "batch length must be equal to the number of prompts"
@@ -273,21 +292,36 @@ def compute_ttrl_metrics(batch, n):
 
     # Aggregate vote distribution stats across prompts.
     # vote_stats_list is repeated n times (once per sample), deduplicate by stride n.
+    # Use .get() throughout so this is safe for both MCQ stats (vote_entropy,
+    # n_unique_answers) and open-ended stats (mean_pairwise_sim, ...).
     vote_stats_list = batch.non_tensor_batch.get("vote_stats_list", None)
     if vote_stats_list is not None and len(vote_stats_list) > 0:
         unique_stats = [vote_stats_list[i] for i in range(0, len(vote_stats_list), n)]
         num_p = len(unique_stats)
-        avg_entropy = sum(s["vote_entropy"] for s in unique_stats) / num_p
-        avg_unique = sum(s["n_unique_answers"] for s in unique_stats) / num_p
-        frac_unanimous = sum(1 for s in unique_stats if s["unanimous"]) / num_p
-        total_unparseable = sum(s["n_unparseable"] for s in unique_stats)
-        total_votes = sum(s["n_total"] for s in unique_stats)
-        frac_unparseable = total_unparseable / total_votes if total_votes > 0 else 0.0
 
-        ttrl_metrics["vote_entropy"] = avg_entropy
-        ttrl_metrics["vote_n_unique_answers"] = avg_unique
+        # Common fields (present in both MCQ and open-ended stats).
+        frac_unanimous = sum(1 for s in unique_stats if s.get("unanimous", False)) / num_p
+        total_unparseable = sum(s.get("n_unparseable", 0) for s in unique_stats)
+        total_votes = sum(s.get("n_total", 0) for s in unique_stats)
+        frac_unparseable = total_unparseable / total_votes if total_votes > 0 else 0.0
         ttrl_metrics["vote_frac_unanimous"] = frac_unanimous
         ttrl_metrics["vote_frac_unparseable"] = frac_unparseable
+
+        # MCQ-only fields.
+        if "vote_entropy" in unique_stats[0]:
+            avg_entropy = sum(s.get("vote_entropy", 0.0) for s in unique_stats) / num_p
+            avg_unique = sum(s.get("n_unique_answers", 0) for s in unique_stats) / num_p
+            ttrl_metrics["vote_entropy"] = avg_entropy
+            ttrl_metrics["vote_n_unique_answers"] = avg_unique
+
+        # Open-ended-only fields (collapse diagnostics).
+        if "mean_pairwise_sim" in unique_stats[0]:
+            ttrl_metrics["oe_mean_pairwise_sim"] = sum(s["mean_pairwise_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["oe_max_pairwise_sim"] = sum(s["max_pairwise_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["oe_sim_std"] = sum(s["sim_std"] for s in unique_stats) / num_p
+            ttrl_metrics["oe_medoid_mean_sim"] = sum(s["medoid_mean_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["oe_frac_high_sim"] = sum(s["frac_high_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["oe_unique_responses"] = sum(s.get("unique_responses", 0) for s in unique_stats) / num_p
 
     return ttrl_metrics
 
@@ -335,8 +369,14 @@ def _prompt_compute_ttrl_metrics(
     assert len(majority_reward) == len(gt_reward)
 
     grade_result = grade(majority_label, gt_label)
-    hit_rate = 1.0 if grade_result else 0.0
-    
+    # MCQ grade returns bool; open-ended grade returns a float in [0, 1].
+    # In the bool case we want hit_rate in {0.0, 1.0}; in the float case we
+    # want the continuous value to flow through as label_accuracy.
+    if isinstance(grade_result, bool):
+        hit_rate = 1.0 if grade_result else 0.0
+    else:
+        hit_rate = float(grade_result)
+
     # DEBUG: Show label comparison
     TTRL_DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
     if TTRL_DEBUG:
@@ -346,10 +386,14 @@ def _prompt_compute_ttrl_metrics(
         print(f"  grade(majority, gt) = {grade_result} -> label_accuracy = {hit_rate}", file=sys.stderr)
         print(f"  majority_rewards: {majority_reward}", file=sys.stderr)
         print(f"  gt_rewards: {gt_reward}", file=sys.stderr)
-    
+
+    # For MCQ rewards are in {0, 1}, so equality is meaningful. For open-ended
+    # rewards are floats and exact equality is virtually impossible, so we use
+    # a tolerance. The metric still represents "fraction of rollouts where the
+    # pseudo-label-derived reward matches the GT-derived reward".
     rewards_hit_rate = 0
     for estimate_reward, true_reward in zip(majority_reward, gt_reward):
-        if estimate_reward == true_reward:
+        if abs(float(estimate_reward) - float(true_reward)) < 1e-4:
             rewards_hit_rate += 1
     rewards_hit_rate = rewards_hit_rate / len(majority_reward)
     

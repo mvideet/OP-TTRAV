@@ -47,3 +47,15 @@ verl/*.whl.1
 # Figures / generated assets
 *.png
 figs/
+
+# Data files (large JSONs, media, eval results)
+*.json
+*.csv
+*.jpg
+*.jpeg
+*.mp3
+*.wav
+*.mp4
+*.avi
+mm_data/
+verl/data/*/mm_data/

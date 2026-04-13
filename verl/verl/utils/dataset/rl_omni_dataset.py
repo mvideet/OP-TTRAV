@@ -107,6 +107,7 @@ class RLOMNIDataset(Dataset):
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.video_file_key = config.get("video_file_key", "video_file")  # For direct video paths
+        self.image_file_key = config.get("image_file_key", "image_file")  # For direct image paths (e.g. OmniBench)
         self.audio_file_key = config.get("audio_file_key", "audio_file")  # For direct audio paths (audio-only datasets)
         self.question_key = config.get("question_key", "question")  # For question text
         self.answer_key = config.get("answer_key", "answer")  # For ground truth answer
@@ -268,8 +269,16 @@ class RLOMNIDataset(Dataset):
             question = example.get(self.question_key, "")
             video_file = example.get(self.video_file_key, "")
             audio_file = example.get(self.audio_file_key, "")
+            image_file = example.get(self.image_file_key, "")
 
-            if video_file and not self.use_omnivideo_text:
+            if image_file and not self.use_omnivideo_text:
+                # Image (+audio): e.g. OmniBench
+                content_list = [{"type": "image", "image": image_file}]
+                if audio_file:
+                    content_list.append({"type": "audio", "audio": audio_file})
+                content_list.append({"type": "text", "text": question})
+                messages = [{"role": "user", "content": content_list}]
+            elif video_file and not self.use_omnivideo_text:
                 # OmniVideo: include video (content_list for multimodal processor)
                 video_elem = {"type": "video", "video": video_file, **video_kw}
                 content_list = [
@@ -394,9 +403,15 @@ class RLOMNIDataset(Dataset):
                     )
                 else:
                     # Standard Qwen2-VL / Qwen2.5-Omni style processing
-                    # Handle images
+                    # Handle images: from image list (image_key) or single file (image_file_key)
                     if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
                         images = [process_image(image) for image in row_dict.get(self.image_key, [])]
+                        multi_modal_data["image"] = images
+                    elif self.image_file_key in row_dict and row_dict.get(self.image_file_key, None) is not None:
+                        image_path = row_dict.get(self.image_file_key)
+                        from PIL import Image as PILImage
+                        img = PILImage.open(image_path).convert("RGB")
+                        images = [img]
                         multi_modal_data["image"] = images
 
                     # Handle videos
@@ -445,6 +460,12 @@ class RLOMNIDataset(Dataset):
                             text=[raw_prompt], videos=videos, audio=audios,
                             return_tensors="pt", padding=True,
                             use_audio_in_video=self.use_audio_in_video,
+                        )
+                    elif audios is not None and images is not None and videos is None:
+                        # Image + audio (e.g. OmniBench)
+                        model_inputs = self.processor(
+                            text=[raw_prompt], images=images, audio=audios,
+                            return_tensors="pt", padding=True,
                         )
                     elif audios is not None and images is None and videos is None:
                         # Audio-only (Qwen2.5-Omni / MMAU)
