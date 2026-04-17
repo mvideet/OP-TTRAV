@@ -44,9 +44,13 @@ else:
     from verl.utils.reward_score.ttrl_math import extract_answer, simplify_expression_string, grade
     print(f"[TTRL] Using ttrl_math extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
 
-def select_top_k_per_prompt(data, n_votes_per_prompt, n_samples_per_prompt):
+def select_top_k_per_prompt(data, n_votes_per_prompt, n_samples_per_prompt, **_kwargs):
     """
     Select the first k rollouts per prompt, used for TTRL downsampling.
+
+    Accepts (and silently ignores) extra kwargs like multi_attempt / tokenizer /
+    max_attempts from in-flight `multi_attempt_sampling` WIP in ray_trainer.py
+    so this module doesn't crash when that feature is disabled (the default).
     """
     assert len(data) % n_votes_per_prompt == 0, "data length must be divisible by n_votes_per_prompt"
     num_prompts = len(data) // n_votes_per_prompt
