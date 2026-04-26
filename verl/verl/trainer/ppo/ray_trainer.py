@@ -255,12 +255,20 @@ def compute_advantage(
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+        # Confidence-weighted advantage (TTRL paper Eq. 5)
+        conf_weights = None
+        if config is not None:
+            ttrl_conf = config.get("confidence_weighted_advantage", {})
+            if ttrl_conf.get("enable", False):
+                if "majority_ratio_list" in data.non_tensor_batch:
+                    conf_weights = data.non_tensor_batch["majority_ratio_list"]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            confidence_weights=conf_weights,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1269,8 +1277,19 @@ class RayPPOTrainer:
 
                             assert len(gen_batch_output) == len(batch) * self.config.ttrl.n_votes_per_prompt
 
-                            batch = apply_ttrl_gt(batch, gen_batch_output, self.config.ttrl.n_votes_per_prompt, self.tokenizer)
-                            gen_batch_output = select_top_k_per_prompt(gen_batch_output, self.config.ttrl.n_votes_per_prompt, self.config.ttrl.n_samples_per_prompt)
+                            batch = apply_ttrl_gt(
+                                batch,
+                                gen_batch_output,
+                                self.config.ttrl.n_votes_per_prompt,
+                                self.tokenizer,
+                                actor_rollout_wg=self.actor_rollout_wg,
+                            )
+                            _multi_attempt = self.config.ttrl.get("multi_attempt_sampling", {}).get("enable", False)
+                            _max_attempts = self.config.ttrl.get("multi_attempt_sampling", {}).get("max_attempts", 3)
+                            gen_batch_output = select_top_k_per_prompt(
+                                gen_batch_output, self.config.ttrl.n_votes_per_prompt, self.config.ttrl.n_samples_per_prompt,
+                                multi_attempt=_multi_attempt, tokenizer=self.tokenizer, max_attempts=_max_attempts,
+                            )
 
                             assert len(gen_batch_output) == len(batch) * self.config.ttrl.n_samples_per_prompt
                         else:
@@ -1538,6 +1557,19 @@ class RayPPOTrainer:
                                   f"({_zero_var_prompts/_n_prompts*100:.0f}% → no gradient) | "
                                   f"per_prompt_acc: mean={np.mean(_prompt_accs):.3f} "
                                   f"min={np.min(_prompt_accs):.3f} max={np.max(_prompt_accs):.3f}")
+
+                        # Log confidence-weighted advantage info
+                        _cwa = self.config.algorithm.get("confidence_weighted_advantage", {})
+                        if _cwa.get("enable", False) and "majority_ratio_list" in batch.non_tensor_batch:
+                            _conf = batch.non_tensor_batch["majority_ratio_list"]
+                            from verl.trainer.ppo.core_algos import _confidence_weight_fn
+                            _applied = [_confidence_weight_fn(float(c)) for c in _conf]
+                            print(f"[CONF_ADV] step={self.global_steps} | fn=exp | "
+                                  f"conf: mean={np.mean(_conf):.4f} min={np.min(_conf):.4f} max={np.max(_conf):.4f} | "
+                                  f"f(conf): mean={np.mean(_applied):.4f} min={np.min(_applied):.4f} max={np.max(_applied):.4f}")
+                            metrics["ttrl/conf_mean"] = float(np.mean(_conf))
+                            metrics["ttrl/conf_min"] = float(np.min(_conf))
+                            metrics["ttrl/conf_weight_mean"] = float(np.mean(_applied))
 
                     # update critic
                     if self.use_critic:

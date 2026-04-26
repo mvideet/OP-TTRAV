@@ -40,6 +40,16 @@ elif TTRL_TASK_TYPE == "open_ended_video":
     def simplify_expression_string(s):
         return s if s else ""
     print(f"[TTRL] Using ttrl_open_ended extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
+elif TTRL_TASK_TYPE == "judge_open_ended":
+    # LLM-as-judge open-ended TTRL: BGE-medoid voting picks a pseudo-GT, then
+    # the same policy is used as judge to score each rollout against the
+    # medoid (precomputed in apply_ttrl_judge_gt and looked up per-rollout
+    # by ttrl_judge.reward_func). extract_answer/grade reuse the open-ended
+    # primitives for compute_ttrl_metrics + eval-time BGE fallback.
+    from verl.utils.reward_score.ttrl_judge import extract_answer, grade
+    def simplify_expression_string(s):
+        return s if s else ""
+    print(f"[TTRL] Using ttrl_judge extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
 else:
     from verl.utils.reward_score.ttrl_math import extract_answer, simplify_expression_string, grade
     print(f"[TTRL] Using ttrl_math extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
@@ -78,19 +88,25 @@ def apply_original_gt(batch):
     return batch
 
 
-def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer):
+def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg=None):
     """
     Apply the majority vote ground truth to the batch.
 
     Dispatch:
       * TTRL_TASK_TYPE=open_ended_video -> embedding-medoid voting
         (verl.trainer.ppo.ttrl_open_ended_vote.apply_ttrl_open_ended_gt)
+      * TTRL_TASK_TYPE=judge_open_ended -> BGE-medoid voting + LLM-as-judge
+        (verl.trainer.ppo.ttrl_judge_vote.apply_ttrl_judge_gt). Requires
+        actor_rollout_wg so the same policy can run as judge.
       * everything else                  -> string-counting majority voting
         (the original implementation below; preserved unchanged for MCQ flows)
     """
     if TTRL_TASK_TYPE == "open_ended_video":
         from verl.trainer.ppo.ttrl_open_ended_vote import apply_ttrl_open_ended_gt
         return apply_ttrl_open_ended_gt(batch, gen_batch_output, n, tokenizer)
+    if TTRL_TASK_TYPE == "judge_open_ended":
+        from verl.trainer.ppo.ttrl_judge_vote import apply_ttrl_judge_gt
+        return apply_ttrl_judge_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg)
 
     assert len(gen_batch_output) % n == 0, "gen_batch_output length must be divisible by n"
     num_prompts = len(gen_batch_output) // n
