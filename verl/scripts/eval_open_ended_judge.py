@@ -140,7 +140,11 @@ def _judge_with_thinker(thinker, processor, question: str, reference: str, candi
     return decoded, score, ok
 
 
-def evaluate_checkpoint(thinker, processor, test_data, args):
+def evaluate_checkpoint(thinker, processor, test_data, args, jsonl_writer=None, step=None):
+    """Returns aggregate summary dict. If jsonl_writer is given, dumps per-sample
+    JSONL records: {step, id, category, question, gold, rollouts, judge_raws,
+    judge_scores, agg_score}. The JSONL is the source-of-truth raw eval data —
+    re-judging offline with a different model only needs the rollouts field."""
     cat_key = args.category_key
     if cat_key is None and test_data:
         for k in ["question_type", "source", "content_parent_category"]:
@@ -203,6 +207,20 @@ def evaluate_checkpoint(thinker, processor, test_data, args):
         agg = float(np.mean(per_rollout_scores)) if per_rollout_scores else 0.0
         judge_scores.append(agg)
         cat_scores[category].append(agg)
+
+        if jsonl_writer is not None:
+            jsonl_writer.write(json.dumps({
+                "step": step,
+                "id": sample.get("id", i),
+                "category": category,
+                "question": question,
+                "gold": gold,
+                "rollouts": rollouts,
+                "judge_raws": per_rollout_raws,
+                "judge_scores": per_rollout_scores,
+                "agg_score": agg,
+            }, ensure_ascii=False) + "\n")
+            jsonl_writer.flush()
 
         if i < 3:
             print(f"\n  === SANITY sample {i} ===")
@@ -287,6 +305,11 @@ def main():
     cat_writer.writerow(["step", "eval_n", "category", "judge_mean", "n"])
     cat_csv_file.flush()
 
+    # Per-sample raw dump: question + gold + rollouts + judge outputs. This
+    # is the file you can re-judge offline with a different judge.
+    jsonl_path = csv_path.parent / (csv_path.stem + "_rollouts.jsonl")
+    jsonl_writer = open(jsonl_path, "w")
+
     for step, step_dir in step_dirs:
         print(f"\n{'=' * 60}")
         print(f"Step {step}")
@@ -308,7 +331,8 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-        summary = evaluate_checkpoint(thinker, processor, test_data, args)
+        summary = evaluate_checkpoint(thinker, processor, test_data, args,
+                                       jsonl_writer=jsonl_writer, step=step)
         elapsed = time.time() - t0
         print(f"\n  Step {step}: judge_mean={summary['mean']:.4f} "
               f"frac_zero={summary['frac_zero']:.3f} "
@@ -342,8 +366,10 @@ def main():
 
     csv_file.close()
     cat_csv_file.close()
+    jsonl_writer.close()
     print(f"\nResults written to {csv_path}")
     print(f"Per-category results: {cat_csv}")
+    print(f"Per-sample rollouts JSONL: {jsonl_path}")
 
 
 if __name__ == "__main__":
