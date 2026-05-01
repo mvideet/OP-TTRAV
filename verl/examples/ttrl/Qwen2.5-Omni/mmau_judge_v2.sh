@@ -61,7 +61,7 @@ MAX_RESPONSE_LENGTH=1024
 # 1000 train samples / batch=4 = 250 steps/epoch. Cap at 200 steps to match
 # do_judge_v2 (89391) horizon and overnight walltime budget.
 EPISODE="${EPISODE:-1}"
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-200}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 DATA_TRAIN_BATCH_SIZE=4
 N_VOTES_PER_PROMPT=16
 N_SAMPLES_PER_PROMPT=4

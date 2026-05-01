@@ -9,7 +9,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=22:00:00
+#SBATCH --time=48:00:00
 #SBATCH --requeue
 
 # LLM-as-judge OE TTRL on MMAU (audio-only). Replicates do_judge_v2
@@ -30,7 +30,7 @@ export TTRL_TASK_TYPE=judge_open_ended
 export TTRL_CG_ENABLE=0
 
 export EPISODE="${EPISODE:-1}"
-export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-200}"
+export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 export TEST_FREQ="${TEST_FREQ:-10}"
 export VAL_BEFORE_TRAIN=true
 export VAL_DO_SAMPLE=false
