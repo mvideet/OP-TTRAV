@@ -4,7 +4,7 @@
 #SBATCH -e /data/sls/scratch/mvideet/TTRL/slurm/err/mmau_jdg_v2_%j.err
 #SBATCH --qos=regular
 #SBATCH --partition=a6
-#SBATCH --exclude=sls-a6-1
+#SBATCH --exclude=sls-a6-1,sls-a6-3
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
