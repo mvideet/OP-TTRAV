@@ -78,9 +78,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -1652,9 +1650,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -2206,9 +2202,7 @@
     "answer": "C",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -2376,9 +2370,7 @@
     "answer": "C",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -4310,9 +4302,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -4768,9 +4758,7 @@
     "answer": "C",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -5790,9 +5778,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -7436,9 +7422,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -9214,9 +9198,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -9252,9 +9234,7 @@
     "answer": "B",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -9302,9 +9282,7 @@
     "answer": "D",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"

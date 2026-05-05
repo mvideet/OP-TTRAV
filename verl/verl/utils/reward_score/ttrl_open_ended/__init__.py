@@ -165,7 +165,23 @@ def reward_func(
     try:
         if isinstance(ground_truth, (list, tuple)):
             ground_truth = ground_truth[0] if ground_truth else ""
-        res = compute_score(solution_str, str(ground_truth) if ground_truth is not None else "")
+        gt_str = str(ground_truth) if ground_truth is not None else ""
+        res = compute_score(solution_str, gt_str)
+
+        # Periodic sanity logging (every 100th call)
+        if not hasattr(reward_func, "_call_count"):
+            reward_func._call_count = 0
+        reward_func._call_count += 1
+        if reward_func._call_count <= 5 or reward_func._call_count % 100 == 0:
+            pred_snippet = (res.get("pred", "")[:80] + "...") if len(res.get("pred", "")) > 80 else res.get("pred", "")
+            gt_snippet = (gt_str[:80] + "...") if len(gt_str) > 80 else gt_str
+            print(
+                f"[OE_REWARD] call={reward_func._call_count} "
+                f"score={res['score']:.3f} sim={res['sim']:.3f} "
+                f"pred='{pred_snippet}' gt='{gt_snippet}'",
+                file=sys.stderr,
+                flush=True,
+            )
 
         if isinstance(res, dict):
             return res

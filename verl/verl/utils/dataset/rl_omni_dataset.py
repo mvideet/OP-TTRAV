@@ -137,6 +137,7 @@ class RLOMNIDataset(Dataset):
         self.video_max_frames = config.get("video_max_frames", None)  # e.g. 32  (default in lib: 768)
         self.video_min_frames = config.get("video_min_frames", None)  # e.g. 4   (default in lib: 4)
         self.video_max_pixels = config.get("video_max_pixels", None)  # per-frame max pixels
+        self.image_max_pixels = config.get("image_max_pixels", None)  # cap image resolution to limit tokens
 
         # Audio truncation: clip audio to at most this many seconds (None = full duration)
         self.max_audio_duration = config.get("max_audio_duration", None)  # e.g. 30.0
@@ -411,6 +412,13 @@ class RLOMNIDataset(Dataset):
                         image_path = row_dict.get(self.image_file_key)
                         from PIL import Image as PILImage
                         img = PILImage.open(image_path).convert("RGB")
+                        # Cap image resolution to limit vision token count
+                        if self.image_max_pixels is not None:
+                            w, h = img.size
+                            if w * h > self.image_max_pixels:
+                                scale = (self.image_max_pixels / (w * h)) ** 0.5
+                                new_w, new_h = int(w * scale), int(h * scale)
+                                img = img.resize((new_w, new_h), PILImage.LANCZOS)
                         images = [img]
                         multi_modal_data["image"] = images
 

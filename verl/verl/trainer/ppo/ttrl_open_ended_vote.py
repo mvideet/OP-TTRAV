@@ -219,12 +219,48 @@ def apply_ttrl_open_ended_gt(batch, gen_batch_output, n, tokenizer):
 
     medoid_list, sim_list, stats_list = _batch_semantic_vote(model_outputs, n)
 
-    if _DEBUG or _OE_DEBUG:
+    # Track call count for periodic verbose logging
+    if not hasattr(apply_ttrl_open_ended_gt, "_call_count"):
+        apply_ttrl_open_ended_gt._call_count = 0
+    apply_ttrl_open_ended_gt._call_count += 1
+    step = apply_ttrl_open_ended_gt._call_count
+    verbose = step <= 3 or step % 10 == 0  # detailed logs for first 3 steps + every 10th
+
+    print(
+        f"\n[OE_TTRL] step={step} apply_ttrl_open_ended_gt: "
+        f"{num_prompts} prompts, {n} rollouts each, "
+        f"{len(model_outputs)} total outputs",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    # Batch-level collapse summary
+    all_mean_pair = [s["mean_pairwise_sim"] for s in stats_list]
+    all_max_pair = [s["max_pairwise_sim"] for s in stats_list]
+    all_unique = [s["unique_responses"] for s in stats_list]
+    all_frac_high = [s["frac_high_sim"] for s in stats_list]
+    n_collapse_risk = sum(1 for m in all_mean_pair if m > 0.92)
+    print(
+        f"[OE_HEALTH] step={step} | "
+        f"mean_pair: avg={np.mean(all_mean_pair):.3f} min={np.min(all_mean_pair):.3f} max={np.max(all_mean_pair):.3f} | "
+        f"max_pair: avg={np.mean(all_max_pair):.3f} | "
+        f"unique_responses: avg={np.mean(all_unique):.1f}/{n} | "
+        f"frac_high_sim: avg={np.mean(all_frac_high):.3f} | "
+        f"collapse_risk_groups={n_collapse_risk}/{num_prompts}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if n_collapse_risk > num_prompts * 0.5:
         print(
-            f"\n[OE_TTRL] apply_ttrl_open_ended_gt: {num_prompts} prompts, {n} rollouts each",
+            f"[OE_HEALTH] *** WARNING: {n_collapse_risk}/{num_prompts} groups have "
+            f"mean_pairwise_sim > 0.92 — possible mode collapse! ***",
             file=sys.stderr,
             flush=True,
         )
+
+    # Compute per-rollout rewards preview (cosine to medoid) for sanity check
+    from verl.utils.reward_score.ttrl_open_ended import grade as oe_grade
+    all_rewards = []
 
     for i in range(num_prompts):
         data_item = batch[i]
@@ -238,22 +274,72 @@ def apply_ttrl_open_ended_gt(batch, gen_batch_output, n, tokenizer):
         nb = data_item.non_tensor_batch
         video_file = nb.get("video_file", "N/A")
         audio_file = nb.get("audio_file", "N/A")
+        image_file = nb.get("image_file", "N/A")
         question_text = nb.get("question", "N/A")
         sample_id = nb.get("id", nb.get("index", i))
         st = stats_list[i]
+
+        # Compute per-rollout reward for this group
+        group_outputs = model_outputs[i * n : (i + 1) * n]
+        group_rewards = [oe_grade(o, medoid_text) for o in group_outputs]
+        all_rewards.extend(group_rewards)
+        reward_arr = np.array(group_rewards)
+        reward_std = float(reward_arr.std()) if len(reward_arr) > 1 else 0.0
+        zero_var = reward_std < 1e-6
+
+        # Always log the summary line
         print(
-            f"[OE_TTRL INPUT] prompt {i}/{num_prompts} | id={sample_id}"
+            f"[OE_TTRL INPUT] step={step} prompt {i}/{num_prompts} | id={sample_id}"
             f" | mean_pair={st['mean_pairwise_sim']:.3f}"
             f" max_pair={st['max_pairwise_sim']:.3f}"
             f" unique={st['unique_responses']}/{n}"
-            f" medoid_mean_sim={st['medoid_mean_sim']:.3f}"
-            f"\n  video: {video_file}"
-            f"\n  audio: {audio_file}"
-            f"\n  question: {str(question_text)[:200]}"
-            f"\n  medoid:   {medoid_text[:200]}",
+            f" medoid_sim={st['medoid_mean_sim']:.3f}"
+            f" | reward: mean={reward_arr.mean():.3f} std={reward_std:.3f}"
+            f" min={reward_arr.min():.3f} max={reward_arr.max():.3f}"
+            f"{' ZERO_VAR!' if zero_var else ''}",
             file=sys.stderr,
             flush=True,
         )
+
+        # Verbose: full details for first 3 steps or every 10th
+        if verbose:
+            modality = []
+            if video_file and video_file != "N/A": modality.append("video")
+            if audio_file and audio_file != "N/A": modality.append("audio")
+            if image_file and image_file != "N/A": modality.append("image")
+            print(
+                f"  modalities: {'+'.join(modality) if modality else 'text-only'}"
+                f"\n  question: {str(question_text)[:250]}"
+                f"\n  original_gt: {str(original_gt)[:100]}"
+                f"\n  medoid ({len(medoid_text)} chars): {medoid_text[:250]}",
+                file=sys.stderr,
+                flush=True,
+            )
+            # Show individual rollout rewards and snippets
+            for j, (resp, rew) in enumerate(zip(group_outputs, group_rewards)):
+                marker = " <- MEDOID" if resp.strip() == medoid_text.strip() else ""
+                snippet = (resp.strip()[:120] + "...") if len(resp.strip()) > 120 else resp.strip()
+                print(
+                    f"    r{j}: reward={rew:.3f}{marker} | {snippet}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    # Batch reward summary
+    all_rewards_arr = np.array(all_rewards)
+    n_zero_var_groups = sum(
+        1 for i in range(num_prompts)
+        if np.std(all_rewards[i * n : (i + 1) * n]) < 1e-6
+    )
+    print(
+        f"[OE_REWARD_SUMMARY] step={step} | "
+        f"all_rewards: mean={all_rewards_arr.mean():.4f} std={all_rewards_arr.std():.4f} "
+        f"min={all_rewards_arr.min():.4f} max={all_rewards_arr.max():.4f} | "
+        f"zero_var_groups={n_zero_var_groups}/{num_prompts} "
+        f"({'NO GRADIENT' if n_zero_var_groups == num_prompts else 'gradient OK'})",
+        file=sys.stderr,
+        flush=True,
+    )
 
     # Stash list-shaped diagnostics on the batch so compute_ttrl_metrics can
     # aggregate them. Use the same field names the MCQ code path uses where

@@ -202,12 +202,23 @@ def compute_gae_advantage_return(
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 @register_adv_est(AdvantageEstimator.GRPO)  # or simply: @register_adv_est("grpo")
+def _confidence_weight_fn(conf: float) -> float:
+    """Exponential confidence weighting: f(Conf) = exp(Conf - 1).
+
+    Maps [0, 1] → [exp(-1)≈0.368, 1.0]. High-confidence prompts get
+    full gradient; low-confidence prompts are down-weighted but never zeroed.
+    """
+    import math
+    return math.exp(conf - 1.0)
+
+
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: str = True,
+    confidence_weights: np.ndarray = None,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -222,6 +233,9 @@ def compute_grpo_outcome_advantage(
             whether to scale the GRPO advantage.
             If True, the advantage is scaled by the std, as in the original GRPO.
             If False, the advantage is not scaled, as in Dr.GRPO (https://arxiv.org/abs/2503.20783).
+        confidence_weights: `(np.ndarray)` optional
+            Per-prompt confidence values in [0, 1] from majority voting.
+            Shape is (num_prompts,). When provided, advantages are scaled by exp(Conf - 1).
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -234,6 +248,16 @@ def compute_grpo_outcome_advantage(
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
+
+    # Build per-prompt confidence lookup if provided
+    id2conf = {}
+    if confidence_weights is not None:
+        # confidence_weights is indexed by prompt position (0, 1, 2, ...)
+        # index maps each sample to its prompt position
+        unique_ids = sorted(set(index))
+        for prompt_pos, uid in enumerate(unique_ids):
+            if prompt_pos < len(confidence_weights):
+                id2conf[uid] = float(confidence_weights[prompt_pos])
 
     with torch.no_grad():
         bsz = scores.shape[0]
@@ -253,6 +277,10 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+            # Apply confidence weighting: A_i *= f(Conf)
+            if id2conf:
+                conf = id2conf.get(index[i], 1.0)
+                scores[i] = scores[i] * _confidence_weight_fn(conf)
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
@@ -667,6 +695,65 @@ def compute_policy_loss(
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("gspo")
+def compute_policy_loss_gspo(
+    old_log_prob,
+    log_prob,
+    advantages,
+    response_mask,
+    loss_agg_mode="token-mean",
+    config=None,
+):
+    """
+    Group Sequence Policy Optimization (GSPO) policy loss.
+
+    Replaces GRPO's per-token importance ratio with a length-normalized
+    sequence-level ratio:
+
+        s_i = (pi_theta(y_i|x) / pi_old(y_i|x))^(1 / |y_i|)
+            = exp( (1/|y_i|) * sum_t (log pi_theta_t - log pi_old_t) )
+
+    Sequence-level clipping then replaces PPO's token-level clip. Group-
+    relative advantages are reused (so per-prompt constants still cancel
+    under group-mean normalization, same as GRPO).
+
+    Signature matches the `get_policy_loss_fn` registry contract in
+    workers/actor/dp_actor.py: (old_log_prob, log_prob, advantages,
+    response_mask, loss_agg_mode, config) ->
+    (pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower).
+
+    Paper: Qwen team, "Group Sequence Policy Optimization" (2025).
+    """
+    cliprange = config.clip_ratio
+    cliprange_low = config.clip_ratio_low if config.clip_ratio_low is not None else cliprange
+    cliprange_high = config.clip_ratio_high if config.clip_ratio_high is not None else cliprange
+
+    # Per-token log-ratio, clamped for stability.
+    log_ratio = log_prob - old_log_prob
+    log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+
+    # Length-normalized sequence-level log-ratio (geometric mean of token ratios).
+    seq_len = response_mask.sum(dim=-1).clamp(min=1.0)  # (B,)
+    seq_log_ratio = (log_ratio * response_mask).sum(dim=-1) / seq_len  # (B,)
+    seq_ratio = torch.exp(seq_log_ratio)  # (B,)
+
+    # Per-sequence advantage: outcome-based advantages are broadcast across
+    # tokens in GRPO, so the masked mean equals the per-sequence scalar.
+    seq_advantage = (advantages * response_mask).sum(dim=-1) / seq_len  # (B,)
+
+    # Sequence-level clipped PPO objective.
+    pg_losses1 = -seq_advantage * seq_ratio
+    pg_losses2 = -seq_advantage * torch.clamp(seq_ratio, 1 - cliprange_low, 1 + cliprange_high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    pg_loss = pg_losses.mean()
+    pg_clipfrac = torch.gt(pg_losses2, pg_losses1).float().mean()
+    ppo_kl = -seq_log_ratio.mean()
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 

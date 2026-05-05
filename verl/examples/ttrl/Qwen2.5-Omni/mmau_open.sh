@@ -1,5 +1,8 @@
 #!/bin/bash
-# TTRL fine-tuning of Qwen2.5-Omni model on OmniBench (image + audio QA)
+# Open-ended TTRL fine-tuning of Qwen2.5-Omni on MMAU (audio-only).
+#
+# Uses embedding-medoid voting (BGE-small) instead of MCQ string-counting.
+# Trains on test_mini_open.json (MCQ options stripped, answer_text as reference).
 
 # ------------------------------------------------------------
 # Environment Setup
@@ -9,9 +12,11 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-export TTRL_TASK_TYPE=video_qa
+export TTRL_TASK_TYPE=open_ended_video
 export HF_DATASETS_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
+
+export TTRL_OE_DEBUG="${TTRL_OE_DEBUG:-1}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
@@ -21,7 +26,6 @@ fi
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
-# Cluster: writable runtime dirs for Ray
 unset ROCR_VISIBLE_DEVICES || true
 export ROCR_VISIBLE_DEVICES=
 export XDG_RUNTIME_DIR="/data/sls/scratch/mvideet/xdg_runtime/${SLURM_JOB_ID:-manual}"
@@ -33,11 +37,11 @@ mkdir -p "$RAY_TMPDIR"
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-TASK="OmniBench"
+TASK="MMAU"
 BACKBONE="Qwen2.5-Omni-3B"
 ADVANTAGE="grpo"
 
-# Image+audio: with image_max_pixels=1M, largest images produce ~1.3k vision tokens
+# Audio-only: shorter prompts
 MAX_PROMPT_LENGTH=4096
 MAX_RESPONSE_LENGTH=512
 
@@ -48,51 +52,27 @@ N_SAMPLES_PER_PROMPT=4
 MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
 
-# TTRL majority-voting mode
-TRAIN_ON_GT_LABELS="${TRAIN_ON_GT_LABELS:-0}"
-if [[ "${TRAIN_ON_GT_LABELS}" != "0" ]]; then
-  TTRL_ENABLE=false
-  ROLLOUT_N="${ROLLOUT_N:-$N_SAMPLES_PER_PROMPT}"
-  TRAIN_MODE_DESC="ground-truth labels"
-else
-  TTRL_ENABLE=true
-  ROLLOUT_N="${ROLLOUT_N:-$N_VOTES_PER_PROMPT}"
-  TRAIN_MODE_DESC="TTRL majority-voted labels"
-fi
+TTRL_ENABLE=true
+ROLLOUT_N="${ROLLOUT_N:-$N_VOTES_PER_PROMPT}"
+TRAIN_MODE_DESC="open-ended TTRL (semantic medoid)"
 
-# Validation
 VAL_N="${VAL_N:-1}"
 VAL_DO_SAMPLE="${VAL_DO_SAMPLE:-false}"
 VAL_TOP_P="${VAL_TOP_P:-0.95}"
 VAL_TEMPERATURE="${VAL_TEMPERATURE:-0.0}"
-TEST_FREQ="${TEST_FREQ:-5}"
-VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
-
+TEST_FREQ="${TEST_FREQ:--1}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 AUDIO_SAMPLE_RATE="${AUDIO_SAMPLE_RATE:-16000}"
 
 DATA_LOCAL_DIR="${REPO_ROOT}/verl/data/${TASK}"
 BACKBONE_PATH="/data/sls/scratch/mvideet/models/${BACKBONE}"
 
 N_GPUS="${N_GPUS:-4}"
-# TTRL: train on the test set itself (majority voting, not GT labels)
-TRAIN_FILES="${DATA_LOCAL_DIR}/test.json"
-# Use a small val subset for periodic monitoring
-VAL_FILE="${DATA_LOCAL_DIR}/test_val20.json"
-if [[ ! -f "${VAL_FILE}" ]]; then
-  # Auto-create val subset if missing
-  python3 -c "
-import json, random
-random.seed(42)
-with open('${DATA_LOCAL_DIR}/test.json') as f: data = json.load(f)
-subset = random.sample(data, min(20, len(data)))
-with open('${VAL_FILE}', 'w') as f: json.dump(subset, f, ensure_ascii=False, indent=2)
-print(f'Created {len(subset)}-sample val subset at ${VAL_FILE}')
-"
-fi
-VAL_FILES="${VAL_FILE}"
+TRAIN_FILES="${DATA_LOCAL_DIR}/test_mini_open.json"
+VAL_FILES="${DATA_LOCAL_DIR}/test_mini_open_val20.json"
 
 MODEL="${TASK}-${BACKBONE}"
-EXPERIMENT="TTRL-OmniBench"
+EXPERIMENT="TTRL-MMAU-Open"
 
 WANDB_PROJECT="TTRL-verl"
 LOG_NAME="${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
@@ -100,8 +80,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/data/sls/scratch/mvideet/TTRL/verl/checkpoints/TTRL-v
 
 cd "${REPO_ROOT}" || exit 1
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
-echo "Training mode: ${TRAIN_MODE_DESC} (TRAIN_ON_GT_LABELS=${TRAIN_ON_GT_LABELS}, ttrl.enable=${TTRL_ENABLE}, rollout.n=${ROLLOUT_N})"
-echo "Validation: test_freq=${TEST_FREQ}, val_before_train=${VAL_BEFORE_TRAIN}, val_n=${VAL_N}, val_do_sample=${VAL_DO_SAMPLE}, val_temperature=${VAL_TEMPERATURE}"
+echo "Training mode: ${TRAIN_MODE_DESC} (TTRL_TASK_TYPE=${TTRL_TASK_TYPE}, ttrl.enable=${TTRL_ENABLE}, rollout.n=${ROLLOUT_N})"
 echo "Audio: audio_sample_rate=${AUDIO_SAMPLE_RATE}"
 
 python -m verl.trainer.main_ppo \
@@ -114,15 +93,14 @@ python -m verl.trainer.main_ppo \
   data.val_batch_size=8 \
   data.filter_overlong_prompts=False \
   data.truncation='error' \
-  +data.suffix_prompt='"\nExplain your reasoning step by step in detail, then give your final answer as exactly one of: \\boxed{A}, \\boxed{B}, \\boxed{C}, or \\boxed{D}."' \
+  +data.suffix_prompt='"\nExplain your reasoning step by step, then give a concise answer to the question in 1-3 complete sentences."' \
   +data.collate_fn=verl.utils.dataset.collate_fn.default_collate_fn \
   data.trust_remote_code=True \
   data.use_qwen2_5_omni=True \
-  +data.image_file_key='image_file' \
+  data.video_file_key='video_file' \
   +data.audio_file_key='audio_file' \
-  +data.image_max_pixels=1000000 \
   data.question_key='question' \
-  data.answer_key='answer' \
+  data.answer_key='answer_text' \
   data.use_audio_in_video=False \
   +data.audio_sample_rate=${AUDIO_SAMPLE_RATE} \
   +data.max_audio_duration=${MAX_AUDIO_DURATION:-30.0} \
@@ -170,7 +148,7 @@ python -m verl.trainer.main_ppo \
   critic.use_dynamic_bsz=True \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_video_qa/__init__.py" \
+  custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_open_ended/__init__.py" \
   custom_reward_function.name=reward_func \
   ttrl.enable=$TTRL_ENABLE \
   ttrl.n_votes_per_prompt=$N_VOTES_PER_PROMPT \

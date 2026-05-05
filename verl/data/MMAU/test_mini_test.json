@@ -330,9 +330,7 @@
     "answer": "C",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
@@ -2228,9 +2226,7 @@
     "answer": "A",
     "source": "mmau",
     "dataset": "synthetic",
-    "category": [
-      "Reasoning"
-    ],
+    "category": "Reasoning",
     "sub_category": "Temporal Event Reasoning",
     "difficulty": "easy",
     "task": "sound"
