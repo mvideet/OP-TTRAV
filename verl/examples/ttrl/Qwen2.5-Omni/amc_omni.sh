@@ -120,7 +120,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.val_kwargs.do_sample=False \
   actor_rollout_ref.rollout.val_kwargs.n=1 \
   actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-  actor_rollout_ref.rollout.val_kwargs.temperature=0.0 \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
   critic.optim.lr=9e-6 \
   critic.model.use_remove_padding=True \
   critic.model.path=$BACKBONE_PATH \

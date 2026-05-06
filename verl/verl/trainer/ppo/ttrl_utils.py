@@ -107,6 +107,9 @@ def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg=None):
     if TTRL_TASK_TYPE == "judge_open_ended":
         from verl.trainer.ppo.ttrl_judge_vote import apply_ttrl_judge_gt
         return apply_ttrl_judge_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg)
+    if TTRL_TASK_TYPE == "evolrl_cluster":
+        from verl.trainer.ppo.ttrl_evolrl_cluster_vote import apply_ttrl_evolrl_cluster_gt
+        return apply_ttrl_evolrl_cluster_gt(batch, gen_batch_output, n, tokenizer)
 
     assert len(gen_batch_output) % n == 0, "gen_batch_output length must be divisible by n"
     num_prompts = len(gen_batch_output) // n
@@ -342,6 +345,20 @@ def compute_ttrl_metrics(batch, n):
             ttrl_metrics["oe_medoid_mean_sim"] = sum(s["medoid_mean_sim"] for s in unique_stats) / num_p
             ttrl_metrics["oe_frac_high_sim"] = sum(s["frac_high_sim"] for s in unique_stats) / num_p
             ttrl_metrics["oe_unique_responses"] = sum(s.get("unique_responses", 0) for s in unique_stats) / num_p
+
+        # EVOL-RL cluster-vote diagnostics.
+        if "n_clusters" in unique_stats[0]:
+            ttrl_metrics["cluster_avg_K"] = sum(s["n_clusters"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_modal_frac"] = sum(s["modal_cluster_size_frac"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_modal_size"] = sum(s["modal_cluster_size"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_novelty_mean"] = sum(s["novelty_mean"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_novelty_std"] = sum(s["novelty_std"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_intra_modal_sim"] = sum(s["intra_modal_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_inter_cluster_sim"] = sum(s["inter_cluster_sim"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_frac_invalid"] = sum(s["frac_invalid"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_frac_ambiguous"] = sum(
+                1.0 if s["modal_cluster_size_frac"] < 0.5 else 0.0 for s in unique_stats
+            ) / num_p
 
     return ttrl_metrics
 

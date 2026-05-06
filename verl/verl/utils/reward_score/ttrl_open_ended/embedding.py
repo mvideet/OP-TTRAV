@@ -53,13 +53,22 @@ _DEFAULT_MODEL_PATHS = [
     "BAAI/bge-small-en-v1.5",
 ]
 
+# Qwen3-Embedding-4B path (used when TTRL_OE_ENCODER=qwen3).
+_QWEN3_MODEL_PATHS = [
+    os.environ.get("QWEN3_EMBED_PATH", ""),
+    "/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B",
+    "Qwen/Qwen3-Embedding-4B",
+]
+# Encoder backend: "bge" (default) or "qwen3". Qwen3 is 4B params, bf16, GPU-only.
+_ENCODER = os.environ.get("TTRL_OE_ENCODER", "bge").lower()
+
 
 def _hash_text(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _load_model():
-    """Lazily load BGE-small. Thread-safe."""
+    """Lazily load encoder (BGE-small or Qwen3-Embedding-4B). Thread-safe."""
     global _MODEL, _TOKENIZER, _DEVICE
     if _MODEL is not None:
         return
@@ -70,14 +79,27 @@ def _load_model():
         import torch
         from transformers import AutoModel, AutoTokenizer
 
+        if _ENCODER == "qwen3":
+            paths = _QWEN3_MODEL_PATHS
+            label = "Qwen3-Embedding-4B"
+            # Default GPU+bf16 since 4B on CPU is too slow for vote-time use.
+            default_device = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype = torch.bfloat16 if default_device == "cuda" else torch.float32
+            kwargs = {"torch_dtype": dtype}
+        else:
+            paths = _DEFAULT_MODEL_PATHS
+            label = "BGE-small"
+            default_device = "cpu"
+            kwargs = {}
+
         last_err = None
         chosen_path = None
-        for path in _DEFAULT_MODEL_PATHS:
+        for path in paths:
             if not path:
                 continue
             try:
-                tok = AutoTokenizer.from_pretrained(path)
-                mdl = AutoModel.from_pretrained(path)
+                tok = AutoTokenizer.from_pretrained(path, padding_side="left" if _ENCODER == "qwen3" else "right")
+                mdl = AutoModel.from_pretrained(path, **kwargs)
                 chosen_path = path
                 break
             except Exception as e:  # pragma: no cover
@@ -85,16 +107,11 @@ def _load_model():
                 continue
         else:
             raise RuntimeError(
-                f"[ttrl_open_ended.embedding] Could not load BGE-small from any of {_DEFAULT_MODEL_PATHS}; "
+                f"[ttrl_open_ended.embedding] Could not load {label} from any of {paths}; "
                 f"last error: {last_err!r}"
             )
 
-        # Default to CPU to avoid competing with the actor for GPU memory.
-        # The encoder runs in the gap between rollout generation and actor
-        # update; per-step encoding is small (N_rollouts * batch ~= 64 texts)
-        # and BGE-small is fast on CPU. Override with TTRL_OE_DEVICE=cuda
-        # if you need the speed boost and have headroom.
-        device_pref = os.environ.get("TTRL_OE_DEVICE", "cpu").lower()
+        device_pref = os.environ.get("TTRL_OE_DEVICE", default_device).lower()
         if device_pref == "cuda" and torch.cuda.is_available():
             device = "cuda"
         else:
@@ -109,7 +126,7 @@ def _load_model():
         _TOKENIZER = tok
         _DEVICE = device
         print(
-            f"[ttrl_open_ended.embedding] Loaded BGE encoder from {chosen_path} on {device}",
+            f"[ttrl_open_ended.embedding] Loaded {label} encoder from {chosen_path} on {device}",
             file=sys.stderr,
             flush=True,
         )
@@ -147,16 +164,39 @@ def clear_cache() -> None:
 
 
 def _encode_batch(texts: List[str]) -> np.ndarray:
-    """Run BGE forward on a list of texts; returns [N, d] L2-normalized float32."""
+    """Run encoder forward on a list of texts; returns [N, d] L2-normalized float32."""
     import torch
 
     _load_model()
     if not texts:
         return np.zeros((0, _MODEL.config.hidden_size), dtype=np.float32)
 
-    # BGE recommends prefixing queries with "Represent this sentence for retrieval:" but
-    # for symmetric similarity (rollout vs rollout) we treat both sides as passages and
-    # use the raw text. This matches the standard sentence-transformer usage of bge-small.
+    if _ENCODER == "qwen3":
+        # Qwen3-Embedding-4B: last-token pooling on left-padded inputs.
+        max_len = int(os.environ.get("TTRL_OE_MAX_LEN", "1024"))
+        enc = _TOKENIZER(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=max_len,
+            return_tensors="pt",
+        )
+        enc = {k: v.to(_DEVICE) for k, v in enc.items()}
+        with torch.no_grad():
+            out = _MODEL(**enc)
+            # Left-padding -> last hidden state of last token IS the EOS rep.
+            hidden = out.last_hidden_state  # [B, T, D]
+            # Pick last non-pad token: with left padding the last position works,
+            # but be defensive and use attention_mask to find it.
+            attn = enc["attention_mask"]
+            # last index of 1 in attention mask (right-most token)
+            seq_lens = attn.sum(dim=1) - 1  # [B]
+            idx = seq_lens.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, hidden.size(-1))
+            last = hidden.gather(1, idx).squeeze(1)  # [B, D]
+            last = torch.nn.functional.normalize(last, p=2, dim=1)
+        return last.detach().to(torch.float32).cpu().numpy()
+
+    # BGE-small (default): CLS pooling.
     enc = _TOKENIZER(
         texts,
         padding=True,
@@ -168,9 +208,7 @@ def _encode_batch(texts: List[str]) -> np.ndarray:
 
     with torch.no_grad():
         out = _MODEL(**enc)
-        # CLS pooling: first token of last_hidden_state.
         cls = out.last_hidden_state[:, 0]
-        # L2 normalize.
         cls = torch.nn.functional.normalize(cls, p=2, dim=1)
 
     arr = cls.detach().to(torch.float32).cpu().numpy()
