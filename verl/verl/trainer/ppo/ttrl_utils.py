@@ -40,12 +40,11 @@ elif TTRL_TASK_TYPE == "open_ended_video":
     def simplify_expression_string(s):
         return s if s else ""
     print(f"[TTRL] Using ttrl_open_ended extract_answer and grade functions (TTRL_TASK_TYPE={TTRL_TASK_TYPE})")
-elif TTRL_TASK_TYPE == "judge_open_ended":
-    # LLM-as-judge open-ended TTRL: BGE-medoid voting picks a pseudo-GT, then
-    # the same policy is used as judge to score each rollout against the
-    # medoid (precomputed in apply_ttrl_judge_gt and looked up per-rollout
-    # by ttrl_judge.reward_func). extract_answer/grade reuse the open-ended
-    # primitives for compute_ttrl_metrics + eval-time BGE fallback.
+elif TTRL_TASK_TYPE in ("judge_open_ended", "evolrl_cluster", "simple_cluster"):
+    # Cluster/judge open-ended TTRL: vote precomputes per-rollout reward
+    # and stashes a JSON {text -> reward} score map; ttrl_judge.reward_func
+    # looks up by text. extract_answer/grade reuse the open-ended primitives
+    # for compute_ttrl_metrics + eval-time BGE/Qwen3 cosine fallback.
     from verl.utils.reward_score.ttrl_judge import extract_answer, grade
     def simplify_expression_string(s):
         return s if s else ""
@@ -349,19 +348,22 @@ def compute_ttrl_metrics(batch, n):
             ttrl_metrics["oe_frac_high_sim"] = sum(s["frac_high_sim"] for s in unique_stats) / num_p
             ttrl_metrics["oe_unique_responses"] = sum(s.get("unique_responses", 0) for s in unique_stats) / num_p
 
-        # EVOL-RL cluster-vote diagnostics.
+        # Cluster-vote diagnostics (EVOL-RL or simple). Guard each key
+        # with .get so simple_cluster stats (no novelty fields) don't crash.
         if "n_clusters" in unique_stats[0]:
-            ttrl_metrics["cluster_avg_K"] = sum(s["n_clusters"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_modal_frac"] = sum(s["modal_cluster_size_frac"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_modal_size"] = sum(s["modal_cluster_size"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_novelty_mean"] = sum(s["novelty_mean"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_novelty_std"] = sum(s["novelty_std"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_intra_modal_sim"] = sum(s["intra_modal_sim"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_inter_cluster_sim"] = sum(s["inter_cluster_sim"] for s in unique_stats) / num_p
-            ttrl_metrics["cluster_frac_invalid"] = sum(s["frac_invalid"] for s in unique_stats) / num_p
+            ttrl_metrics["cluster_avg_K"] = sum(s.get("n_clusters", 0) for s in unique_stats) / num_p
+            ttrl_metrics["cluster_modal_frac"] = sum(s.get("modal_cluster_size_frac", 0.0) for s in unique_stats) / num_p
+            ttrl_metrics["cluster_modal_size"] = sum(s.get("modal_cluster_size", 0) for s in unique_stats) / num_p
+            ttrl_metrics["cluster_intra_modal_sim"] = sum(s.get("intra_modal_sim", 0.0) for s in unique_stats) / num_p
+            ttrl_metrics["cluster_inter_cluster_sim"] = sum(s.get("inter_cluster_sim", 0.0) for s in unique_stats) / num_p
+            ttrl_metrics["cluster_frac_invalid"] = sum(s.get("frac_invalid", 0.0) for s in unique_stats) / num_p
             ttrl_metrics["cluster_frac_ambiguous"] = sum(
-                1.0 if s["modal_cluster_size_frac"] < 0.5 else 0.0 for s in unique_stats
+                1.0 if s.get("modal_cluster_size_frac", 0.0) < 0.5 else 0.0 for s in unique_stats
             ) / num_p
+            # Novelty fields only present on EVOL-RL stats.
+            if "novelty_mean" in unique_stats[0]:
+                ttrl_metrics["cluster_novelty_mean"] = sum(s["novelty_mean"] for s in unique_stats) / num_p
+                ttrl_metrics["cluster_novelty_std"] = sum(s.get("novelty_std", 0.0) for s in unique_stats) / num_p
 
     return ttrl_metrics
 
