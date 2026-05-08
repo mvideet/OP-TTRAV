@@ -403,6 +403,12 @@ class vLLMRollout(BaseRollout):
                     non_tensor_batch["raw_prompt"] = _repeat_interleave(
                         non_tensor_batch["raw_prompt"], self.sampling_params.n
                     )
+                # Multimodal: repeat per-prompt mm fields so non_tensor_batch
+                # length matches the bs*n batch (Qwen2.5-Omni and any VL run).
+                if "multi_modal_inputs" in non_tensor_batch.keys():
+                    non_tensor_batch["multi_modal_inputs"] = _repeat_interleave(
+                        non_tensor_batch["multi_modal_inputs"], self.sampling_params.n
+                    )
 
             seq = torch.cat([idx, response], dim=-1)
 
