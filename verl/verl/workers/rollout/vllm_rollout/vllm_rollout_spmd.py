@@ -301,12 +301,23 @@ class vLLMRollout(BaseRollout):
             raw_ids = non_tensor_batch.pop("raw_prompt_ids")
             mm_data = non_tensor_batch.pop("multi_modal_data")
             for i, (raw_prompt_ids, multi_modal_data) in enumerate(zip(raw_ids, mm_data)):
+                kw = mm_proc_kwargs_list[i] if mm_proc_kwargs_list and i < len(mm_proc_kwargs_list) else {}
+                # When use_audio_in_video=True, the prompt template only has
+                # video placeholders (audio is interleaved within video tokens).
+                # Strip the separate "audio" key from multi_modal_data so vLLM's
+                # processor doesn't try to apply a non-existent audio prompt
+                # replacement. The audio waveform still reaches the model via
+                # the video processing path because the dataset preprocessor
+                # passed audio= to the processor with use_audio_in_video=True.
+                if isinstance(multi_modal_data, dict) and kw.get("use_audio_in_video"):
+                    if "audio" in multi_modal_data and "video" in multi_modal_data:
+                        multi_modal_data = {k: v for k, v in multi_modal_data.items() if k != "audio"}
                 item: Dict[str, Any] = {
                     "prompt_token_ids": raw_prompt_ids,
                     "multi_modal_data": multi_modal_data,
                 }
-                if mm_proc_kwargs_list and i < len(mm_proc_kwargs_list) and mm_proc_kwargs_list[i]:
-                    item["mm_processor_kwargs"] = mm_proc_kwargs_list[i]
+                if kw:
+                    item["mm_processor_kwargs"] = kw
                 vllm_inputs.append(item)
         else:
             vllm_inputs = [
