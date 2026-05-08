@@ -19,7 +19,7 @@
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
 
 export TTRL_TASK_TYPE="${TTRL_TASK_TYPE:-judge_open_ended}"
 export HF_DATASETS_OFFLINE=0

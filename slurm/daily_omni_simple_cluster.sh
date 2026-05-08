@@ -68,6 +68,11 @@ export VAL_TOP_P=0.95
 export VIDEO_FPS=0.5
 export AUDIO_SAMPLE_RATE=8000
 
+# vLLM rollout: V0 engine + clear expandable_segments (cumem allocator
+# incompatibilities surface in V1 + FSDP coexistence).
+export VLLM_USE_V1=0
+export PYTORCH_CUDA_ALLOC_CONF=
+
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
 conda activate verl312
 
@@ -88,6 +93,17 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   trainer.save_freq=$SAVE_FREQ \
   trainer.test_freq=$TEST_FREQ \
   trainer.val_before_train=$VAL_BEFORE_TRAIN \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+  actor_rollout_ref.rollout.enforce_eager=True \
+  actor_rollout_ref.rollout.free_cache_engine=False \
+  actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
+  actor_rollout_ref.rollout.max_model_len=12000 \
+  actor_rollout_ref.rollout.enable_chunked_prefill=False \
+  +actor_rollout_ref.rollout.limit_audios=1 \
+  +actor_rollout_ref.rollout.limit_videos=1 \
+  +actor_rollout_ref.rollout.limit_images=0 \
   actor_rollout_ref.rollout.n=16 \
   actor_rollout_ref.rollout.temperature=1.0 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
