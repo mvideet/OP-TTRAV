@@ -73,5 +73,8 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni.sh \
   +actor_rollout_ref.rollout.limit_audios=1 \
   +actor_rollout_ref.rollout.limit_videos=1 \
   +actor_rollout_ref.rollout.limit_images=0 \
+  +actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
+  +actor_rollout_ref.rollout.max_model_len=12000 \
+  actor_rollout_ref.rollout.enable_chunked_prefill=False \
   ttrl.n_votes_per_prompt=8 \
   ttrl.n_samples_per_prompt=4
