@@ -267,6 +267,246 @@ def _evolrl_cluster_vote(
     return anchor_text, score_map, stats, per_rollout_rewards
 
 
+def _simple_cluster_vote(
+    model_outputs: List[str],
+) -> Tuple[str, Dict[str, float], dict, List[float]]:
+    """
+    Stripped-down cluster vote with BINARY reward (no novelty, no banding).
+
+    Per-rollout reward:
+        in modal cluster: 1.0
+        elsewhere:        0.0
+        invalid:          0.0
+
+    Same k-means and embedding pipeline as _evolrl_cluster_vote, just with
+    none of the EVOL-RL/DAPO machinery on top. This is the rung-1 ablation
+    of "does plain cluster voting beat medoid voting?"
+
+    Returns same shape as _evolrl_cluster_vote (anchor, score_map, stats,
+    per_rollout_rewards) so the dispatch code is parallel.
+    """
+    n = len(model_outputs)
+    assert n > 0, "empty rollout group"
+
+    cleaned = [(o or "").strip() for o in model_outputs]
+    valid_idx = [i for i, c in enumerate(cleaned) if c]
+    n_invalid = n - len(valid_idx)
+
+    if not valid_idx:
+        stats = {
+            "n_total": n,
+            "n_invalid": n,
+            "n_clusters": 0,
+            "modal_cluster_size": 0,
+            "modal_cluster_size_frac": 0.0,
+            "intra_modal_sim": 0.0,
+            "inter_cluster_sim": 0.0,
+            "frac_invalid": 1.0,
+        }
+        per_rollout = [0.0] * n
+        return "", {}, stats, per_rollout
+
+    valid_texts = [cleaned[i] for i in valid_idx]
+    E = encode_cached(valid_texts)
+    for text, vec in zip(valid_texts, E):
+        put_cached(text, vec)
+    m = E.shape[0]
+
+    labels, centroids, K = _kmeans_auto_k(E)
+
+    cluster_sizes = np.bincount(labels, minlength=K)
+    largest = int(cluster_sizes.max())
+    candidates = np.where(cluster_sizes == largest)[0]
+    if len(candidates) == 1:
+        modal = int(candidates[0])
+    else:
+        # Tie-break: highest mean cosine-to-centroid among members.
+        best_modal, best_mean = int(candidates[0]), -2.0
+        for c in candidates:
+            mask = labels == c
+            cent = centroids[c] / (np.linalg.norm(centroids[c]) + 1e-12)
+            mean_sim = float((E[mask] @ cent).mean())
+            if mean_sim > best_mean:
+                best_modal, best_mean = int(c), mean_sim
+        modal = best_modal
+
+    modal_centroid = centroids[modal] / (np.linalg.norm(centroids[modal]) + 1e-12)
+    sims_to_centroid = E @ modal_centroid
+    anchor_local = int(np.argmax(sims_to_centroid))
+    anchor_text = valid_texts[anchor_local]
+
+    in_modal = labels == modal
+
+    # Binary reward.
+    rewards_valid = in_modal.astype(float)
+
+    per_rollout_rewards = [0.0] * n
+    for local_i, orig_i in enumerate(valid_idx):
+        per_rollout_rewards[orig_i] = float(rewards_valid[local_i])
+
+    score_map: Dict[str, float] = {}
+    for i, c in enumerate(cleaned):
+        if c:
+            score_map[cleaned[i]] = per_rollout_rewards[i]
+
+    # Diagnostics (subset of EVOL-RL stats).
+    S = cosine_matrix(E)
+    np.fill_diagonal(S, -2.0)
+    intra_modal_sim = float(S[in_modal][:, in_modal].mean()) if in_modal.sum() > 1 else 0.0
+    if K > 1:
+        inter_block = S.copy()
+        np.fill_diagonal(inter_block, 0.0)
+        same_label = labels[:, None] == labels[None, :]
+        inter_mask = ~same_label & (inter_block > -1.5)
+        inter_cluster_sim = float(inter_block[inter_mask].mean()) if inter_mask.any() else 0.0
+    else:
+        inter_cluster_sim = 0.0
+
+    stats = {
+        "n_total": n,
+        "n_invalid": n_invalid,
+        "n_clusters": int(K),
+        "modal_cluster_size": int(in_modal.sum()),
+        "modal_cluster_size_frac": float(in_modal.sum() / max(1, m)),
+        "intra_modal_sim": intra_modal_sim,
+        "inter_cluster_sim": inter_cluster_sim,
+        "frac_invalid": float(n_invalid / n),
+    }
+
+    if _DEBUG or _OE_DEBUG:
+        print(
+            f"[SIMPLE_CLUSTER_VOTE] n={n} m_valid={m} K={K} modal={modal} "
+            f"|modal|={int(in_modal.sum())}/{m} "
+            f"intra={intra_modal_sim:.3f} inter={inter_cluster_sim:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return anchor_text, score_map, stats, per_rollout_rewards
+
+
+def apply_ttrl_simple_cluster_gt(batch, gen_batch_output, n, tokenizer):
+    """
+    Rung-1 ablation: plain cluster vote with binary {0, 1} reward.
+
+    Same dispatch shape as apply_ttrl_evolrl_cluster_gt; uses
+    _simple_cluster_vote which strips the novelty / banding machinery.
+    Reward path still routes through ttrl_judge.reward_func via the JSON
+    score map stash.
+    """
+    assert len(gen_batch_output) % n == 0, (
+        f"gen_batch_output length {len(gen_batch_output)} not divisible by n={n}"
+    )
+    num_prompts = len(gen_batch_output) // n
+    assert len(batch) == num_prompts
+
+    model_outputs: List[str] = []
+    for i in range(num_prompts):
+        start = i * n
+        for j in range(n):
+            data_item = gen_batch_output[start + j]
+            prompt_ids = data_item.batch["prompts"]
+            prompt_length = prompt_ids.shape[-1]
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+            response_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            model_outputs.append(response_str)
+
+    if not hasattr(apply_ttrl_simple_cluster_gt, "_call_count"):
+        apply_ttrl_simple_cluster_gt._call_count = 0
+    apply_ttrl_simple_cluster_gt._call_count += 1
+    step = apply_ttrl_simple_cluster_gt._call_count
+    verbose = step <= 3 or step % 10 == 0
+
+    print(
+        f"\n[SIMPLE_CLUSTER_TTRL] step={step}: {num_prompts} prompts, {n} rollouts each",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    anchor_list: List[str] = []
+    stats_list: List[dict] = []
+    sim_list: List[float] = []
+    score_map_list: List[Dict[str, float]] = []
+    all_rewards: List[float] = []
+
+    for i in range(num_prompts):
+        group_outputs = model_outputs[i * n : (i + 1) * n]
+        anchor, score_map, stats, group_rewards = _simple_cluster_vote(group_outputs)
+        anchor_list.append(anchor)
+        stats_list.append(stats)
+        sim_list.append(stats["modal_cluster_size_frac"])
+        score_map_list.append(score_map)
+        all_rewards.extend(group_rewards)
+
+    for i in range(num_prompts):
+        data_item = batch[i]
+        original_gt = data_item.non_tensor_batch["reward_model"].get("ground_truth", "")
+        gt_json = json.dumps(score_map_list[i], ensure_ascii=False)
+        data_item.non_tensor_batch["reward_model"]["ground_truth"] = gt_json
+        data_item.non_tensor_batch["reward_model"]["majority_gt"] = anchor_list[i]
+        data_item.non_tensor_batch["reward_model"]["original_gt"] = original_gt
+
+        st = stats_list[i]
+        nb = data_item.non_tensor_batch
+        sample_id = nb.get("id", nb.get("index", i))
+        question_text = nb.get("question", "N/A")
+        group_outputs = model_outputs[i * n : (i + 1) * n]
+        group_rewards = all_rewards[i * n : (i + 1) * n]
+        reward_arr = np.array(group_rewards)
+
+        print(
+            f"[SIMPLE_CLUSTER INPUT] step={step} prompt {i}/{num_prompts} | id={sample_id}"
+            f" | K={st['n_clusters']} modal_frac={st['modal_cluster_size_frac']:.2f}"
+            f" intra_modal={st['intra_modal_sim']:.3f} inter={st['inter_cluster_sim']:.3f}"
+            f" | reward: mean={reward_arr.mean():.3f} std={reward_arr.std():.3f}"
+            f" min={reward_arr.min():.3f} max={reward_arr.max():.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        if verbose:
+            print(
+                f"  question: {str(question_text)[:200]}"
+                f"\n  original_gt: {str(original_gt)[:100]}"
+                f"\n  anchor ({len(anchor_list[i])} chars): {anchor_list[i][:200]}",
+                file=sys.stderr,
+                flush=True,
+            )
+            for j, (resp, rew) in enumerate(zip(group_outputs, group_rewards)):
+                marker = " <- ANCHOR" if resp.strip() == anchor_list[i].strip() else ""
+                snippet = (resp.strip()[:120] + "...") if len(resp.strip()) > 120 else resp.strip()
+                print(
+                    f"    r{j}: reward={rew:.0f}{marker} | {snippet}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    all_rewards_arr = np.array(all_rewards)
+    n_zero_var = sum(
+        1 for i in range(num_prompts)
+        if np.std(all_rewards[i * n : (i + 1) * n]) < 1e-6
+    )
+    avg_modal_frac = float(np.mean([s["modal_cluster_size_frac"] for s in stats_list]))
+    avg_K = float(np.mean([s["n_clusters"] for s in stats_list]))
+    avg_intra = float(np.mean([s["intra_modal_sim"] for s in stats_list]))
+    avg_inter = float(np.mean([s["inter_cluster_sim"] for s in stats_list]))
+    print(
+        f"[SIMPLE_CLUSTER_HEALTH] step={step} | "
+        f"avg_K={avg_K:.2f} avg_modal_frac={avg_modal_frac:.3f} "
+        f"avg_intra_modal={avg_intra:.3f} avg_inter_cluster={avg_inter:.3f} | "
+        f"reward: mean={all_rewards_arr.mean():.3f} std={all_rewards_arr.std():.3f} "
+        f"zero_var_groups={n_zero_var}/{num_prompts}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    batch.non_tensor_batch["majority_ratio_list"] = np.array(sim_list, dtype=float)
+    batch.non_tensor_batch["vote_stats_list"] = np.array(stats_list, dtype=object)
+    return batch
+
+
 def apply_ttrl_evolrl_cluster_gt(batch, gen_batch_output, n, tokenizer):
     """
     EVOL-RL cluster voting analog of apply_ttrl_open_ended_gt /

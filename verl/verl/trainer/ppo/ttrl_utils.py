@@ -110,6 +110,9 @@ def apply_ttrl_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg=None):
     if TTRL_TASK_TYPE == "evolrl_cluster":
         from verl.trainer.ppo.ttrl_evolrl_cluster_vote import apply_ttrl_evolrl_cluster_gt
         return apply_ttrl_evolrl_cluster_gt(batch, gen_batch_output, n, tokenizer)
+    if TTRL_TASK_TYPE == "simple_cluster":
+        from verl.trainer.ppo.ttrl_evolrl_cluster_vote import apply_ttrl_simple_cluster_gt
+        return apply_ttrl_simple_cluster_gt(batch, gen_batch_output, n, tokenizer)
 
     assert len(gen_batch_output) % n == 0, "gen_batch_output length must be divisible by n"
     num_prompts = len(gen_batch_output) // n
