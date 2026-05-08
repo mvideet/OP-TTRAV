@@ -104,6 +104,7 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   +actor_rollout_ref.rollout.limit_audios=1 \
   +actor_rollout_ref.rollout.limit_videos=1 \
   +actor_rollout_ref.rollout.limit_images=0 \
+  data.use_audio_in_video=False \
   actor_rollout_ref.rollout.n=16 \
   actor_rollout_ref.rollout.temperature=1.0 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
