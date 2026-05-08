@@ -9,7 +9,7 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 # HF rollout uses the FSDP actor directly - no vLLM, no FlashInfer JIT needed
 # expandable_segments reduces memory fragmentation during FSDP + generation
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
 
 # Video QA: use ttrl_video_qa extract_answer/grade
 export TTRL_TASK_TYPE=video_qa

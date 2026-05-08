@@ -27,6 +27,10 @@ export WANDB_MODE=offline   # smoke test, no need to log
 # If we see audio-token-count assertions, set VLLM_USE_V1=0 and rerun.
 # export VLLM_USE_V1=0
 
+# vLLM's memory pool is incompatible with expandable_segments
+# (pytorch/pytorch#147851). Disable for vLLM rollout runs.
+export PYTORCH_CUDA_ALLOC_CONF=
+
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 
