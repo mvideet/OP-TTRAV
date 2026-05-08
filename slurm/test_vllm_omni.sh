@@ -24,8 +24,10 @@ mkdir -p /data/sls/scratch/mvideet/TTRL/slurm/out /data/sls/scratch/mvideet/TTRL
 export WANDB_MODE=offline   # smoke test, no need to log
 
 # vLLM 0.16 should default to V1 with audio fixes per UPGRADE_VLLM_0.16.md.
-# If we see audio-token-count assertions, set VLLM_USE_V1=0 and rerun.
-# export VLLM_USE_V1=0
+# But V1's cumem_allocator hits "invalid argument at cumem_allocator.cpp:119"
+# in our FSDP+vLLM coexistence pattern. V0 uses a different allocator path
+# that tolerates the FSDP-actor-already-on-GPU state.
+export VLLM_USE_V1=0
 
 # vLLM's memory pool is incompatible with expandable_segments
 # (pytorch/pytorch#147851). Disable for vLLM rollout runs.
