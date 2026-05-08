@@ -444,6 +444,14 @@ class vLLMRollout(BaseRollout):
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
 
+        # Drop multimodal keys from gen_batch_output's non_tensor_batch.
+        # The original prompts batch already carries these; including them
+        # again breaks DataProto.union (pandas tensor-equality assertion
+        # fails for object-dtype arrays of tensor dicts). Mirrors hf_rollout
+        # which returns batch only (no non_tensor_batch).
+        for _mm_key in ("multi_modal_inputs", "multi_modal_data", "raw_prompt_ids"):
+            non_tensor_batch.pop(_mm_key, None)
+
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
 
