@@ -34,10 +34,9 @@ export TTRL_OE_DEBUG=0
 
 # Task / encoder.
 export TTRL_TASK_TYPE=simple_cluster
-export TTRL_OE_ENCODER=qwen3
-export QWEN3_EMBED_PATH=/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B
-export TTRL_OE_DEVICE=cuda
-export TTRL_OE_MAX_LEN=1024
+export TTRL_OE_ENCODER=bge      # use BGE-small (fast on CPU); Qwen3 falls back to CPU and is too slow on 7B model
+export TTRL_OE_DEVICE=cpu
+export TTRL_OE_MAX_LEN=512
 
 # Cluster knobs.
 export TTRL_CLUSTER_K_MAX=4
