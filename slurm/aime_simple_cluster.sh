@@ -51,6 +51,9 @@ export SAVE_FREQ=100
 export TEST_FREQ=25
 export VAL_BEFORE_TRAIN=true
 
+unset ROCR_VISIBLE_DEVICES || true
+export ROCR_VISIBLE_DEVICES=
+
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
 conda activate verl312
 
