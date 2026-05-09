@@ -107,8 +107,8 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.optim.lr=5e-7 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
   actor_rollout_ref.actor.optim.warmup_style='cosine' \
-  actor_rollout_ref.actor.fsdp_config.param_offload=False \
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH)) \
   actor_rollout_ref.actor.entropy_coeff=0.0 \
   actor_rollout_ref.actor.clip_ratio_low=0.20 \
@@ -121,7 +121,8 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.30 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
+  actor_rollout_ref.rollout.max_num_seqs=64 \
   actor_rollout_ref.rollout.n=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.val_kwargs.do_sample=true \
   actor_rollout_ref.rollout.val_kwargs.n=1 \
