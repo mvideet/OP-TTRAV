@@ -49,8 +49,8 @@ export TTRL_CG_ENABLE=0
 # Train horizon: 300 steps for direct comparison with do_simple.
 export TOTAL_TRAINING_STEPS=300
 export SAVE_FREQ=100
-export TEST_FREQ=25
-export VAL_BEFORE_TRAIN=true
+export TEST_FREQ=-1            # skip mid-train val (Qwen3-CPU eval too slow)
+export VAL_BEFORE_TRAIN=false  # AIME val will be done offline at the end
 
 unset ROCR_VISIBLE_DEVICES || true
 export ROCR_VISIBLE_DEVICES=
