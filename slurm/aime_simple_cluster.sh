@@ -69,10 +69,10 @@ BACKBONE="Qwen2.5-7B"
 ADVANTAGE="grpo"
 
 MAX_PROMPT_LENGTH=512
-MAX_RESPONSE_LENGTH=3072
-DATA_TRAIN_BATCH_SIZE=8
-N_VOTES_PER_PROMPT=16
-N_SAMPLES_PER_PROMPT=4
+MAX_RESPONSE_LENGTH=2048
+DATA_TRAIN_BATCH_SIZE=4
+N_VOTES_PER_PROMPT=8
+N_SAMPLES_PER_PROMPT=2
 MINI_BATCH_SIZE=1
 MICRO_BATCH_SIZE=1
 
@@ -121,7 +121,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.40 \
   actor_rollout_ref.rollout.n=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.val_kwargs.do_sample=true \
   actor_rollout_ref.rollout.val_kwargs.n=1 \
