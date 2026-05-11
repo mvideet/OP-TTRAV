@@ -365,6 +365,18 @@ def compute_ttrl_metrics(batch, n):
                 ttrl_metrics["cluster_novelty_mean"] = sum(s["novelty_mean"] for s in unique_stats) / num_p
                 ttrl_metrics["cluster_novelty_std"] = sum(s.get("novelty_std", 0.0) for s in unique_stats) / num_p
 
+        # Auxiliary monitoring metrics (set by ttrl_aux_metrics; opt-in via
+        # TTRL_AUX_DETERMINISTIC / TTRL_AUX_GPT_JUDGE). Only emit keys that
+        # are actually present so older runs don't pick up zeros.
+        for aux_key in (
+            "aux_bleu_mean", "aux_rouge_l_mean",
+            "aux_exact_match_mean", "aux_contains_em_mean",
+            "aux_resp_len_tokens_mean",
+            "aux_gpt_judge_mean", "aux_gpt_judge_parse_rate",
+        ):
+            if aux_key in unique_stats[0]:
+                ttrl_metrics[aux_key] = sum(s.get(aux_key, 0.0) for s in unique_stats) / num_p
+
     return ttrl_metrics
 
 

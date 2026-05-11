@@ -53,6 +53,71 @@ from eval_mmau_offline import (  # noqa: E402
 )
 
 
+def _is_text_only_model(base_model_path: str) -> bool:
+    """Detect non-Omni text-only base models (e.g. Qwen2.5-Math-1.5B)."""
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(base_model_path, trust_remote_code=True)
+    return not hasattr(cfg, "thinker_config")
+
+
+def load_text_model_with_checkpoint(base_model_path: str, state_dict: dict | None = None):
+    """Load AutoModelForCausalLM + tokenizer for text-only models."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    print("  Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
+    print("  Loading base model...")
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+    )
+    if state_dict is not None:
+        print(f"  Loading checkpoint weights ({len(state_dict)} params)...")
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"  WARNING: {len(missing)} missing keys: {missing[:5]}...")
+        if unexpected:
+            print(f"  WARNING: {len(unexpected)} unexpected keys: {unexpected[:5]}...")
+    return model.to("cuda").eval(), tokenizer
+
+
+def _prepare_text_inputs(sample, tokenizer, args, sample_idx):
+    """Build tokenized inputs for one text-only sample."""
+    question = sample.get("question") or sample.get("prompt") or ""
+    gt_answer = sample["answer"]
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": question + args.suffix_prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt", padding=True)
+    inputs = {k: v.to("cuda") for k, v in inputs.items()}
+    if sample_idx < 3:
+        print(f"    [TEXT_VERIFY] input_ids={inputs['input_ids'].shape}")
+    return inputs, gt_answer
+
+
+def _generate_text_one(model, inputs, tokenizer, args, do_sample, temperature):
+    """Generate one text response."""
+    prompt_len = inputs["input_ids"].shape[-1]
+    with torch.no_grad():
+        try:
+            out = model.generate(
+                **inputs,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_p=args.eval_top_p if do_sample else 1.0,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                use_cache=True,
+            )
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            return None
+        except Exception:
+            return None
+    new_tokens = out[0, prompt_len:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt-dir", required=True)
@@ -76,10 +141,12 @@ def parse_args():
                     default="\nExplain your reasoning step by step, then give a concise answer to the question in 1-3 complete sentences.")
     p.add_argument("--gold-key", type=str, default="answer_text")
     p.add_argument("--category-key", type=str, default=None)
+    p.add_argument("--text-only", action="store_true",
+                   help="Force text-only mode (AutoModelForCausalLM); auto-detected from base-model config otherwise.")
     return p.parse_args()
 
 
-def dump_rollouts_for_checkpoint(thinker, processor, test_data, args, jsonl_writer, step):
+def dump_rollouts_for_checkpoint(thinker, processor, test_data, args, jsonl_writer, step, text_only=False):
     cat_key = args.category_key
     if cat_key is None and test_data:
         for k in ["question_type", "source", "content_parent_category"]:
@@ -98,21 +165,26 @@ def dump_rollouts_for_checkpoint(thinker, processor, test_data, args, jsonl_writ
         category = (sample.get(cat_key, "unknown") if cat_key else "unknown")
         if isinstance(category, str):
             category = category.strip().title().replace("Av ", "AV ")
-        question = sample.get("question", "")
+        question = sample.get("question") or sample.get("prompt") or ""
 
-        inputs, _ = _prepare_inputs(sample, processor, args, i)
+        if text_only:
+            inputs, _ = _prepare_text_inputs(sample, processor, args, i)
+            gen_fn = _generate_text_one
+        else:
+            inputs, _ = _prepare_inputs(sample, processor, args, i)
+            gen_fn = _generate_one
         rollouts = []
         if inputs is None:
             # write a record with empty rollouts so downstream can skip
             pass
         elif args.eval_n <= 1:
-            r = _generate_one(thinker, inputs, processor, args, do_sample=False, temperature=1.0)
+            r = gen_fn(thinker, inputs, processor, args, do_sample=False, temperature=1.0)
             if r is not None:
                 rollouts.append(r)
         else:
             for _ in range(args.eval_n):
-                r = _generate_one(thinker, inputs, processor, args,
-                                  do_sample=True, temperature=args.eval_temperature)
+                r = gen_fn(thinker, inputs, processor, args,
+                           do_sample=True, temperature=args.eval_temperature)
                 if r is not None:
                     rollouts.append(r)
 
@@ -145,6 +217,10 @@ def dump_rollouts_for_checkpoint(thinker, processor, test_data, args, jsonl_writ
 
 def main():
     args = parse_args()
+
+    text_only = args.text_only or _is_text_only_model(args.base_model)
+    if text_only:
+        print(f"Text-only mode (base model has no thinker_config).")
 
     with open(args.test_file) as f:
         test_data = json.load(f)
@@ -192,13 +268,16 @@ def main():
             state_dict = merge_fsdp_shards(str(actor_dir))
             print(f"  Merged {len(state_dict)} params")
 
-        thinker, processor = load_model_with_checkpoint(args.base_model, state_dict)
+        if text_only:
+            thinker, processor = load_text_model_with_checkpoint(args.base_model, state_dict)
+        else:
+            thinker, processor = load_model_with_checkpoint(args.base_model, state_dict)
         del state_dict
         gc.collect()
         torch.cuda.empty_cache()
 
         n_dumped = dump_rollouts_for_checkpoint(
-            thinker, processor, test_data, args, jsonl_writer, step
+            thinker, processor, test_data, args, jsonl_writer, step, text_only=text_only,
         )
 
         elapsed = time.time() - t0

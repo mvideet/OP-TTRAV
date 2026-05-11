@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J do_simple
-#SBATCH -o /data/sls/scratch/mvideet/TTRL/slurm/out/do_simple_%j.out
-#SBATCH -e /data/sls/scratch/mvideet/TTRL/slurm/err/do_simple_%j.err
+#SBATCH -J do_judge_v3
+#SBATCH -o /data/sls/scratch/mvideet/TTRL/slurm/out/do_judge_v3_%j.out
+#SBATCH -e /data/sls/scratch/mvideet/TTRL/slurm/err/do_judge_v3_%j.err
 #SBATCH --qos=regular
 #SBATCH --partition=a6
 #SBATCH --exclude=sls-a6-1,sls-a6-3
@@ -12,57 +12,57 @@
 #SBATCH --time=72:00:00
 #SBATCH --requeue
 
-# Rung 1 of the ablation ladder: plain cluster vote with binary reward.
+# judge_v3: judge_v2's policy-as-judge reward + vLLM rollout + aux GPT
+# monitoring + clean wandb panels. This is the version that targets the
+# diagnosed failure mode: cluster vote partitions by style, not content;
+# self-judge skips embedding entirely and asks the policy "given the
+# question, score this response 0-10."
 #
-# In modal cluster: r=1.0
-# Else:             r=0.0
-# Invalid:          r=0.0
-#
-# No novelty bonus, no DAPO Clip-Higher, no token-level entropy reg, no
-# actor-side KL. Only changes vs vanilla GRPO are:
-#  - reward function = cluster vote (Qwen3-Embedding-4B + k-means K=2..4)
-#  - ttrl pipeline (rollout.n=16, gen samples=4, vote-then-train)
-#
-# If this beats judge_v2's +3 GPT-4o-mini, the cluster idea works alone
-# and we add EVOL-RL machinery on top. If not, the underlying issue is
-# probably the format-vs-content cluster pathology, and we need to embed
-# only the answer span (the next ablation).
-#
-# 300 steps, save_freq=100, walltime 72h.
+# Differences vs daily_omni_judge_v2.sh:
+#   * vLLM rollout (faster than HF, all patches landed)
+#   * TTRL_AUX_DETERMINISTIC + TTRL_AUX_GPT_JUDGE for monitoring
+#   * 300 steps to match the cluster-vote ablation
+#   * SAVE_FREQ=100 (steps 100/200/300), no in-training eval (offline)
+#   * Clean wandb filter
 
 mkdir -p /data/sls/scratch/mvideet/TTRL/slurm/out /data/sls/scratch/mvideet/TTRL/slurm/err
 
 export WANDB_MODE=online
+export PYTHONUNBUFFERED=1
+export HYDRA_FULL_ERROR=1
+# vLLM rollout - V0 engine, clear expandable_segments.
+export VLLM_USE_V1=0
+export PYTORCH_CUDA_ALLOC_CONF=
 
 export TTRL_DEBUG=1
+export TTRL_JUDGE_DEBUG=1
 export TTRL_OE_DEBUG=0
 export OMNI_INPUT_DEBUG=1
 export OMNI_INPUT_LOG_LIMIT=0
 export OMNI_INPUT_LOG_MAX_Q_CHARS=400
 
-# Task / encoder.
-export TTRL_TASK_TYPE=simple_cluster
-export TTRL_OE_ENCODER=qwen3
-export QWEN3_EMBED_PATH=/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B
-export TTRL_OE_DEVICE=cuda
-export TTRL_OE_MAX_LEN=1024
+# Self-judge reward path.
+export TTRL_TASK_TYPE=judge_open_ended
 
-# Cluster knobs.
-export TTRL_CLUSTER_K_MAX="${TTRL_CLUSTER_K_MAX:-4}"
-export TTRL_CLUSTER_K_MIN="${TTRL_CLUSTER_K_MIN:-2}"
-export TTRL_CLUSTER_SEED=0
+# Judge knobs.
+export TTRL_JUDGE_MAX_NEW_TOKENS="${TTRL_JUDGE_MAX_NEW_TOKENS:-8}"
+export TTRL_JUDGE_MAX_PROMPT_LEN="${TTRL_JUDGE_MAX_PROMPT_LEN:-4096}"
+export TTRL_JUDGE_NEUTRAL_FALLBACK="${TTRL_JUDGE_NEUTRAL_FALLBACK:-0.5}"
 
+# Encoder for the BGE-medoid pre-vote (cheap). Mpnet for content/style sep.
+export TTRL_OE_ENCODER="${TTRL_OE_ENCODER:-mpnet}"
+export MPNET_EMBED_PATH=/data/sls/scratch/mvideet/models/paraphrase-mpnet-base-v2
+export TTRL_OE_DEVICE=cpu
+export TTRL_OE_MAX_LEN=384
+
+# Confidence gate OFF.
 export TTRL_CG_ENABLE=0
 
-# Continuous-medoid reward: r = (cos(rollout_emb, anchor_emb) + 1) / 2 in [0, 1]
-# instead of binary {0, 1}. Restores GRPO gradient when modal_frac is high.
-export TTRL_CLUSTER_CONTINUOUS="${TTRL_CLUSTER_CONTINUOUS:-1}"
-
-# Train horizon: 300 steps, save 100/200/300.
+# Train horizon.
 export EPISODE="${EPISODE:-2}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-300}"
 export SAVE_FREQ="${SAVE_FREQ:-100}"
-# No in-training eval; user will run GPT-4o-mini judge offline on saved ckpts.
+# No in-train eval; GPT eval is run offline on saved ckpts.
 export TEST_FREQ="${TEST_FREQ:--1}"
 export VAL_BEFORE_TRAIN=false
 export VAL_DO_SAMPLE=true
@@ -73,11 +73,6 @@ export VAL_TOP_P=0.95
 export VIDEO_FPS=0.5
 export AUDIO_SAMPLE_RATE=8000
 
-# vLLM rollout: V0 engine + clear expandable_segments (cumem allocator
-# incompatibilities surface in V1 + FSDP coexistence).
-export VLLM_USE_V1=0
-export PYTORCH_CUDA_ALLOC_CONF=
-
 source /data/sls/scratch/mvideet/anaconda3/etc/profile.d/conda.sh
 conda activate verl312
 
@@ -86,35 +81,21 @@ if [ -f /data/sls/r/u/mvideet/home/.openai_key ]; then
   source /data/sls/r/u/mvideet/home/.openai_key
 fi
 
-# Auxiliary monitoring metrics (no training-time effect):
-#   TTRL_AUX_DETERMINISTIC=1  BLEU/ROUGE-L/exact-match (always cheap)
-#   TTRL_AUX_GPT_JUDGE=1      GPT-4o-mini side-channel judge (~$4.50 / 300-step run)
+# Auxiliary monitoring metrics (training is unaffected; diagnostic only).
 export TTRL_AUX_DETERMINISTIC="${TTRL_AUX_DETERMINISTIC:-1}"
 export TTRL_AUX_GPT_JUDGE="${TTRL_AUX_GPT_JUDGE:-1}"
 export TTRL_AUX_GPT_MODEL="${TTRL_AUX_GPT_MODEL:-gpt-4o-mini-2024-07-18}"
 export TTRL_AUX_GPT_CONCURRENCY="${TTRL_AUX_GPT_CONCURRENCY:-8}"
 
-# wandb noise filter: drop debugging/perf series so the dashboard shows
-# only the metrics that matter for the cluster-vote research story.
-# Keeps: actor/{entropy,pg_loss,grad_norm,lr}, train/{label_accuracy,
-# ground_truth_reward,majority_voting_reward,pass@4,cluster_*,aux_*},
-# training/global_step. Drops: global_seqlen, timing, perf, critic mirrors,
-# pg_clipfrac, ppo_kl, reward/{sim,acc} (aliases of reward/score),
-# prompt/response length clip_ratio.
+# wandb noise filter - keep only the metrics that matter for the research.
 export TTRL_LOG_DROP_PATTERNS="${TTRL_LOG_DROP_PATTERNS:-global_seqlen,timing_s/,timing_per_token_ms/,perf/,critic/,actor/pg_clipfrac,actor/ppo_kl,reward/sim,reward/acc,prompt_length/clip_ratio,response_length/clip_ratio,prompt_length/min,prompt_length/max,response_length/min,response_length/max}"
 
 find "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}/verl" -name "*.pyc" -delete 2>/dev/null || true
 
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}" || exit 1
 
-# Hydra overrides:
-#   - rollout.n=16
-#   - rollout.temperature=1.0  (89299 lever)
-#   - max_response_length=1024
-#   - DEFAULT symmetric clipping (clip_ratio_low=high=0.20 — vanilla GRPO)
-#   - entropy_coeff=0           (no entropy reg)
-#   - use_kl_loss=False         (no actor-side KL)
-#   - kl_ctrl.kl_coef=0.0       (no reward-side KL)
+# Hydra overrides matching the cluster-vote vLLM run (89923 / 89887) so the
+# two are directly comparable except for the reward source.
 bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
   trainer.save_freq=$SAVE_FREQ \

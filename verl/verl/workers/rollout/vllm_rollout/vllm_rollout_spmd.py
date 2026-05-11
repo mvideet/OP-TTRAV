@@ -306,7 +306,19 @@ class vLLMRollout(BaseRollout):
                     "multi_modal_data": multi_modal_data,
                 }
                 if mm_proc_kwargs_list and i < len(mm_proc_kwargs_list) and mm_proc_kwargs_list[i]:
-                    item["mm_processor_kwargs"] = mm_proc_kwargs_list[i]
+                    kw = dict(mm_proc_kwargs_list[i])
+                    # If use_audio_in_video=True but mm_data lacks audio, the
+                    # HF Qwen2_5OmniProcessor's replace_multimodal_special_tokens
+                    # raises StopIteration on next(audio_lengths). Drop the flag
+                    # for this request so it processes as video-only.
+                    if kw.get("use_audio_in_video") and (
+                        not isinstance(multi_modal_data, dict)
+                        or "audio" not in multi_modal_data
+                        or not multi_modal_data.get("audio")
+                    ):
+                        kw["use_audio_in_video"] = False
+                    if kw:
+                        item["mm_processor_kwargs"] = kw
                 vllm_inputs.append(item)
         else:
             vllm_inputs = [
@@ -354,12 +366,52 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                lora_request=lora_requests,
-                use_tqdm=False,
-            )
+            try:
+                outputs = self.inference_engine.generate(
+                    prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                    sampling_params=self.sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=False,
+                )
+            except Exception as _e:
+                # Resilience: a single bad multimodal prompt (e.g. HF
+                # processor StopIteration on use_audio_in_video for a
+                # sample whose mm_data lost its audio) takes down the
+                # whole batch. Fall back to per-prompt generation and
+                # substitute a single-EOS dummy for prompts that still
+                # crash so the trainer can keep going.
+                logger.warning(
+                    "[VLLM_ROLLOUT] full-batch generate failed (%s: %s); retrying per-prompt",
+                    type(_e).__name__, str(_e)[:300],
+                )
+
+                class _DummyOutItem:
+                    def __init__(self, eos):
+                        self.token_ids = [eos]
+                        self.logprobs = []
+
+                class _DummyReqOut:
+                    def __init__(self, n, eos):
+                        self.outputs = [_DummyOutItem(eos) for _ in range(n)]
+
+                _n = self.sampling_params.n if hasattr(self.sampling_params, "n") else 1
+                outputs = []
+                for _i, _item in enumerate(vllm_inputs):
+                    _sub_lora = [lora_requests[_i]] if lora_requests else None
+                    try:
+                        _sub = self.inference_engine.generate(
+                            prompts=[_item],
+                            sampling_params=self.sampling_params,
+                            lora_request=_sub_lora,
+                            use_tqdm=False,
+                        )
+                        outputs.extend(_sub)
+                    except Exception as _e2:
+                        logger.warning(
+                            "[VLLM_ROLLOUT] dropping prompt idx=%d (%s: %s)",
+                            _i, type(_e2).__name__, str(_e2)[:200],
+                        )
+                        outputs.append(_DummyReqOut(_n, eos_token_id if isinstance(eos_token_id, int) else 0))
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)

@@ -320,6 +320,45 @@ def apply_ttrl_judge_gt(batch, gen_batch_output, n, tokenizer, actor_rollout_wg)
             flush=True,
         )
 
+    # Auxiliary monitoring metrics (BLEU / ROUGE-L / exact-match / optional
+    # GPT-4o-mini judge) against the *real* gold. Identical hook to the
+    # simple_cluster path — purely diagnostic, doesn't drive training. Gated
+    # by TTRL_AUX_DETERMINISTIC / TTRL_AUX_GPT_JUDGE env vars.
+    try:
+        questions_aux = []
+        golds_aux = []
+        for i in range(num_prompts):
+            nb = batch[i].non_tensor_batch
+            q = nb.get("question") or nb.get("prompt") or ""
+            g = nb["reward_model"].get("original_gt", "")
+            if isinstance(g, (list, tuple)):
+                g = g[0] if g else ""
+            questions_aux.append(str(q))
+            golds_aux.append(str(g))
+        from verl.trainer.ppo.ttrl_aux_metrics import compute_aux_metrics_for_batch
+        compute_aux_metrics_for_batch(
+            batch=batch,
+            model_outputs=model_outputs,
+            num_prompts=num_prompts,
+            n=n,
+            stats_list=vote_stats_list,
+            questions=questions_aux,
+            golds=golds_aux,
+        )
+        if vote_stats_list and "aux_bleu_mean" in vote_stats_list[0]:
+            _agg = lambda k: float(np.mean([s.get(k, 0.0) for s in vote_stats_list]))
+            extra = (
+                f" | aux_bleu={_agg('aux_bleu_mean'):.3f}"
+                f" aux_rouge_l={_agg('aux_rouge_l_mean'):.3f}"
+                f" aux_em={_agg('aux_exact_match_mean'):.3f}"
+            )
+            if "aux_gpt_judge_mean" in vote_stats_list[0]:
+                extra += f" aux_gpt={_agg('aux_gpt_judge_mean'):.3f}"
+            print(f"[JUDGE_AUX] step={step}{extra}", file=sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[JUDGE_AUX] skipped ({type(_e).__name__}: {_e})",
+              file=sys.stderr, flush=True)
+
     # majority_ratio_list: drop in mean per-prompt judge score for the existing
     # wandb dashboard (it expects a per-prompt confidence-ish quantity).
     batch.non_tensor_batch["majority_ratio_list"] = np.array(per_prompt_score_means, dtype=float)

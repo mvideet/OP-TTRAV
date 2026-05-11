@@ -172,9 +172,21 @@ class Tracking:
             self.logger["clearml"] = ClearMLLogger(project_name, experiment_name, config)
 
     def log(self, data, step, backend=None):
+        # Optional drop-list to keep wandb / tensorboard panels clean.
+        # Set TTRL_LOG_DROP_PATTERNS=pat1,pat2,... — any metric whose key
+        # contains one of the patterns is dropped from logging. The console
+        # backend always gets the unfiltered dict so debug logs stay complete.
+        import os as _os
+        drop_patterns = _os.environ.get("TTRL_LOG_DROP_PATTERNS", "")
+        if drop_patterns:
+            patterns = [p.strip() for p in drop_patterns.split(",") if p.strip()]
+            filtered = {k: v for k, v in data.items() if not any(p in k for p in patterns)}
+        else:
+            filtered = data
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                payload = data if default_backend == "console" else filtered
+                logger_instance.log(data=payload, step=step)
 
     def __del__(self):
         if "wandb" in self.logger:

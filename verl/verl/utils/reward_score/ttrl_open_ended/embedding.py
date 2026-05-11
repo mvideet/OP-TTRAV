@@ -59,7 +59,19 @@ _QWEN3_MODEL_PATHS = [
     "/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B",
     "Qwen/Qwen3-Embedding-4B",
 ]
-# Encoder backend: "bge" (default) or "qwen3". Qwen3 is 4B params, bf16, GPU-only.
+# Paraphrase-tuned MPNet — tuned to map paraphrases to nearby points
+# (sentence-transformers/paraphrase-mpnet-base-v2). 110M params, 768d,
+# mean pooling. Useful when content/style separation matters more than
+# retrieval performance.
+_MPNET_MODEL_PATHS = [
+    os.environ.get("MPNET_EMBED_PATH", ""),
+    "/data/sls/scratch/mvideet/models/paraphrase-mpnet-base-v2",
+    "sentence-transformers/paraphrase-mpnet-base-v2",
+]
+# Encoder backend: "bge" (default), "qwen3", or "mpnet".
+#   bge    - BGE-small CLS pooling, retrieval-tuned
+#   qwen3  - Qwen3-Embedding-4B last-token pooling, retrieval-tuned, 4B params
+#   mpnet  - paraphrase-mpnet-base-v2 mean pooling, paraphrase-tuned
 _ENCODER = os.environ.get("TTRL_OE_ENCODER", "bge").lower()
 
 
@@ -86,6 +98,13 @@ def _load_model():
             default_device = "cuda" if torch.cuda.is_available() else "cpu"
             dtype = torch.bfloat16 if default_device == "cuda" else torch.float32
             kwargs = {"torch_dtype": dtype}
+        elif _ENCODER == "mpnet":
+            paths = _MPNET_MODEL_PATHS
+            label = "paraphrase-mpnet-base-v2"
+            # 110M params; GPU is plenty, but CPU is also viable.
+            default_device = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype = torch.bfloat16 if default_device == "cuda" else torch.float32
+            kwargs = {"torch_dtype": dtype}
         else:
             paths = _DEFAULT_MODEL_PATHS
             label = "BGE-small"
@@ -98,7 +117,8 @@ def _load_model():
             if not path:
                 continue
             try:
-                tok = AutoTokenizer.from_pretrained(path, padding_side="left" if _ENCODER == "qwen3" else "right")
+                pad_side = "left" if _ENCODER == "qwen3" else "right"
+                tok = AutoTokenizer.from_pretrained(path, padding_side=pad_side)
                 mdl = AutoModel.from_pretrained(path, **kwargs)
                 chosen_path = path
                 break
@@ -170,6 +190,24 @@ def _encode_batch(texts: List[str]) -> np.ndarray:
     _load_model()
     if not texts:
         return np.zeros((0, _MODEL.config.hidden_size), dtype=np.float32)
+
+    if _ENCODER == "mpnet":
+        # paraphrase-mpnet-base-v2: mean pooling over token embeddings,
+        # masked by attention mask. Sentence-transformers reference impl.
+        max_len = int(os.environ.get("TTRL_OE_MAX_LEN", "384"))
+        enc = _TOKENIZER(
+            texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt",
+        )
+        enc = {k: v.to(_DEVICE) for k, v in enc.items()}
+        with torch.no_grad():
+            out = _MODEL(**enc)
+            hidden = out.last_hidden_state  # [B, T, D]
+            mask = enc["attention_mask"].unsqueeze(-1).float()  # [B, T, 1]
+            summed = (hidden.float() * mask).sum(dim=1)  # [B, D]
+            denom = mask.sum(dim=1).clamp(min=1e-9)  # [B, 1]
+            pooled = summed / denom
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        return pooled.detach().to(torch.float32).cpu().numpy()
 
     if _ENCODER == "qwen3":
         # Qwen3-Embedding-4B: last-token pooling on left-padded inputs.

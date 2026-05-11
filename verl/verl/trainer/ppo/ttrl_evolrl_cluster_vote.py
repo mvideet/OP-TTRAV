@@ -337,8 +337,20 @@ def _simple_cluster_vote(
 
     in_modal = labels == modal
 
-    # Binary reward.
-    rewards_valid = in_modal.astype(float)
+    # Reward shape. Default = binary (1.0 in modal cluster, 0.0 else).
+    # If TTRL_CLUSTER_CONTINUOUS=1, use continuous cosine-sim-to-medoid mapped
+    # to [0, 1]: r = (cos(emb, anchor_emb) + 1) / 2. Restores gradient slope
+    # between "almost in modal" and "far from modal" — useful when modal_frac
+    # is high and binary reward collapses GRPO advantage to ~0.
+    if os.environ.get("TTRL_CLUSTER_CONTINUOUS", "0") == "1":
+        anchor_emb = E[anchor_local]
+        anchor_emb_norm = anchor_emb / (np.linalg.norm(anchor_emb) + 1e-12)
+        E_norms = np.linalg.norm(E, axis=1, keepdims=True) + 1e-12
+        E_unit = E / E_norms
+        sims_to_anchor = E_unit @ anchor_emb_norm  # (m,), in [-1, 1]
+        rewards_valid = (sims_to_anchor + 1.0) / 2.0  # in [0, 1]
+    else:
+        rewards_valid = in_modal.astype(float)
 
     per_rollout_rewards = [0.0] * n
     for local_i, orig_i in enumerate(valid_idx):
@@ -501,6 +513,45 @@ def apply_ttrl_simple_cluster_gt(batch, gen_batch_output, n, tokenizer):
         file=sys.stderr,
         flush=True,
     )
+
+    # Auxiliary monitoring metrics (BLEU / ROUGE-L / exact-match / optional
+    # GPT-4o-mini judge) against the *real* gold. Does not affect training —
+    # only logged via vote_stats_list -> compute_ttrl_metrics. Gated by
+    # TTRL_AUX_DETERMINISTIC=1 (default on) and TTRL_AUX_GPT_JUDGE=1 (opt-in).
+    try:
+        questions = []
+        golds = []
+        for i in range(num_prompts):
+            nb = batch[i].non_tensor_batch
+            q = nb.get("question") or nb.get("prompt") or ""
+            g = nb["reward_model"].get("original_gt", "")
+            if isinstance(g, (list, tuple)):
+                g = g[0] if g else ""
+            questions.append(str(q))
+            golds.append(str(g))
+        from verl.trainer.ppo.ttrl_aux_metrics import compute_aux_metrics_for_batch
+        compute_aux_metrics_for_batch(
+            batch=batch,
+            model_outputs=model_outputs,
+            num_prompts=num_prompts,
+            n=n,
+            stats_list=stats_list,
+            questions=questions,
+            golds=golds,
+        )
+        if stats_list and "aux_bleu_mean" in stats_list[0]:
+            agg = lambda k: float(np.mean([s.get(k, 0.0) for s in stats_list]))
+            extra = (
+                f" | aux_bleu={agg('aux_bleu_mean'):.3f}"
+                f" aux_rouge_l={agg('aux_rouge_l_mean'):.3f}"
+                f" aux_em={agg('aux_exact_match_mean'):.3f}"
+            )
+            if "aux_gpt_judge_mean" in stats_list[0]:
+                extra += f" aux_gpt={agg('aux_gpt_judge_mean'):.3f}"
+            print(f"[SIMPLE_CLUSTER_AUX] step={step}{extra}", file=sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[SIMPLE_CLUSTER_AUX] skipped ({type(_e).__name__}: {_e})",
+              file=sys.stderr, flush=True)
 
     batch.non_tensor_batch["majority_ratio_list"] = np.array(sim_list, dtype=float)
     batch.non_tensor_batch["vote_stats_list"] = np.array(stats_list, dtype=object)

@@ -59,3 +59,11 @@ figs/
 *.avi
 mm_data/
 verl/data/*/mm_data/
+
+# Ephemeral eval / training artifacts (regenerable, large, not source)
+rollouts_*.jsonl
+results_*.csv
+gpt4omini_judge_*.log
+/after
+/TTRV_HANDOFF_PROMPT.md
+/TTRV_PLAN.md
