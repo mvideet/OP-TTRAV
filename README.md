@@ -203,9 +203,9 @@ the conda env) and six patches to `verl/verl/workers/rollout/vllm_rollout/vllm_r
 (in this repo). The verl-side ones are committed; the vLLM-side ones live
 in the conda env and would be lost on env rebuild.
 
-See `docs/pr_drafts/verl_pr_qwen_omni_vllm.md` for the upstream PR draft +
-`docs/pr_drafts/vllm_pr1_merge_interleaved.md` + `docs/pr_drafts/repro_minimal.py`
-for the vLLM-side PRs.
+Upstream PR drafts (for the verl-side patches and the three vLLM-side
+patches) live locally under `docs/pr_drafts/` but are gitignored. Ask
+the maintainer for the drafts if you want to upstream.
 
 ## Code layout
 
@@ -234,7 +234,7 @@ verl/scripts/
   eval_mmau_offline.py          # FSDP shard merger + Omni loader
 
 slurm/                          # All SLURM submission scripts
-docs/pr_drafts/                 # Upstream PR drafts (verl + vLLM)
+docs/                           # (pr_drafts/ exists locally, gitignored)
 ```
 
 ## Things on other branches not yet merged to main

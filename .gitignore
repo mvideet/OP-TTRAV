@@ -70,3 +70,6 @@ gpt4omini_judge_*.log
 
 # Vendored SFT framework - kept locally, not tracked
 LlamaFactory/
+
+# Internal PR drafts — keep locally, not in public repo
+docs/pr_drafts/
