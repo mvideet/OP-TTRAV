@@ -72,6 +72,11 @@ def grade(model_answer: str, gt_answer: str) -> float:
     if not model_answer or not gt_answer:
         return 0.0
 
+    # Datasets sometimes store gold as a 1-element list (HF default for
+    # variable-length fields). Unwrap before extract_answer so we don't
+    # embed the literal string "['text']" with brackets, which murders cos sim.
+    if isinstance(gt_answer, (list, tuple)):
+        gt_answer = gt_answer[0] if gt_answer else ""
     pred_text = extract_answer(model_answer)
     ref_text = extract_answer(gt_answer) if isinstance(gt_answer, str) else str(gt_answer)
     if not pred_text or not ref_text:
