@@ -67,3 +67,6 @@ gpt4omini_judge_*.log
 /after
 /TTRV_HANDOFF_PROMPT.md
 /TTRV_PLAN.md
+
+# Vendored SFT framework - kept locally, not tracked
+LlamaFactory/

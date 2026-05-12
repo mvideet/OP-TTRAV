@@ -74,6 +74,26 @@ sbatch slurm/daily_omni_judge_v2.sh
 sbatch slurm/daily_omni_open.sh
 ```
 
+### 5. Text-only TTRL on Qwen2.5-3B base + UltraFeedback (instruction following)
+
+Faster iteration loop — text-only, single A6 partition, ~3-5 min/step.
+Tests whether cluster-vote TTRL can elicit instruction-following from a
+base model with no labels.
+
+```bash
+# Convert UltraFeedback prompts into VERL JSON (one-time, ~30s)
+python verl/scripts/build_ultrafeedback_ttrl.py \
+  --src /data/sls/scratch/mvideet/datasets/UltraFeedback \
+  --out-dir verl/data/UltraFeedback-TTRL \
+  --train-n 4000 --test-n 500 --sanity-n 50
+
+# Submit training (Qwen2.5-3B base + continuous cluster + Qwen3-4B encoder)
+sbatch slurm/ultrafeedback_simple_cluster.sh
+```
+
+Eval target: AlpacaEval 2.0 length-controlled win-rate vs GPT-4-Turbo
+(base ~5-15%, SFT ~30-40%, DPO ~40-55%).
+
 ## Env-var matrix
 
 | Env var | Default | Effect | Affects vanilla TTRL? |
