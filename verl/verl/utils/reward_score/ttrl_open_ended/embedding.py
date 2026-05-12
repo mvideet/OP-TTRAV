@@ -211,9 +211,18 @@ def _encode_batch(texts: List[str]) -> np.ndarray:
 
     if _ENCODER == "qwen3":
         # Qwen3-Embedding-4B: last-token pooling on left-padded inputs.
+        # The model is retrieval-tuned and expects "Instruct: <task>\nQuery: <text>"
+        # framing. Without it, embeddings of free-form text pairs are poorly
+        # calibrated (we measured ~0.10 cos sim on clear paraphrases vs ~0.75 BGE).
+        # Allow override via TTRL_OE_QWEN3_INSTRUCT.
+        instruction = os.environ.get(
+            "TTRL_OE_QWEN3_INSTRUCT",
+            "Retrieve passages with the same semantic meaning as the query",
+        )
+        wrapped = [f"Instruct: {instruction}\nQuery: {t}" for t in texts]
         max_len = int(os.environ.get("TTRL_OE_MAX_LEN", "1024"))
         enc = _TOKENIZER(
-            texts,
+            wrapped,
             padding=True,
             truncation=True,
             max_length=max_len,

@@ -55,20 +55,73 @@ else:
 
 def select_top_k_per_prompt(data, n_votes_per_prompt, n_samples_per_prompt, **_kwargs):
     """
-    Select the first k rollouts per prompt, used for TTRL downsampling.
+    Select the first k DISTINCT rollouts per prompt, used for TTRL downsampling.
 
-    Accepts (and silently ignores) extra kwargs like multi_attempt / tokenizer /
-    max_attempts from in-flight `multi_attempt_sampling` WIP in ray_trainer.py
-    so this module doesn't crash when that feature is disabled (the default).
+    With temperature=1.0 sampling on smaller / base models, the N votes per
+    prompt frequently contain duplicate text. Without deduping we burn GRPO
+    samples on identical gradients — the effective batch shrinks and the
+    advantage normalization treats N identical copies as N independent
+    samples (wrong variance estimate). Dedup keeps the first n_samples
+    DISTINCT rollouts; if a prompt has fewer than n_samples distinct
+    rollouts, falls back to filling with the remaining (duplicate) votes
+    to preserve batch shape.
+
+    Gated by TTRL_DEDUP_SAMPLES=1 (default on). Falls back to the original
+    first-k behavior when the tokenizer kwarg isn't passed (legacy paths)
+    or when TTRL_DEDUP_SAMPLES=0.
+
+    Accepts (and silently ignores) extra kwargs like multi_attempt /
+    max_attempts from in-flight `multi_attempt_sampling` WIP in ray_trainer.py.
     """
     assert len(data) % n_votes_per_prompt == 0, "data length must be divisible by n_votes_per_prompt"
     num_prompts = len(data) // n_votes_per_prompt
 
-    selected_indices = []
-    for i in range(num_prompts):
-        start = i * n_votes_per_prompt
-        selected_indices.extend(range(start, start + n_samples_per_prompt))
+    tokenizer = _kwargs.get("tokenizer", None)
+    dedup_on = tokenizer is not None and os.environ.get("TTRL_DEDUP_SAMPLES", "1") == "1"
 
+    if not dedup_on:
+        selected_indices = []
+        for i in range(num_prompts):
+            start = i * n_votes_per_prompt
+            selected_indices.extend(range(start, start + n_samples_per_prompt))
+        return data[selected_indices]
+
+    selected_indices: List[int] = []
+    n_underflow = 0
+    for p in range(num_prompts):
+        start = p * n_votes_per_prompt
+        seen_texts: set = set()
+        distinct: List[int] = []
+        for j in range(n_votes_per_prompt):
+            idx = start + j
+            item = data[idx]
+            prompt_len = item.batch["prompts"].shape[-1]
+            resp_ids = item.batch["responses"]
+            valid_len = int(item.batch["attention_mask"][prompt_len:].sum().item())
+            valid_ids = resp_ids[:valid_len]
+            text = tokenizer.decode(valid_ids, skip_special_tokens=True).strip()
+            if text and text not in seen_texts:
+                seen_texts.add(text)
+                distinct.append(idx)
+                if len(distinct) >= n_samples_per_prompt:
+                    break
+        if len(distinct) < n_samples_per_prompt:
+            n_underflow += 1
+            taken = set(distinct)
+            for j in range(n_votes_per_prompt):
+                idx = start + j
+                if idx not in taken:
+                    distinct.append(idx)
+                    if len(distinct) >= n_samples_per_prompt:
+                        break
+        selected_indices.extend(distinct[:n_samples_per_prompt])
+
+    if n_underflow:
+        print(
+            f"[TTRL DEDUP] {n_underflow}/{num_prompts} prompts had < {n_samples_per_prompt} "
+            f"distinct rollouts (need to pad with duplicates)",
+            file=sys.stderr, flush=True,
+        )
     return data[selected_indices]
 
 

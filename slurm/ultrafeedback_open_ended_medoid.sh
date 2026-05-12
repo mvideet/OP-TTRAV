@@ -40,11 +40,18 @@ export TTRL_OE_DEBUG=0
 
 # Reward path — medoid + cos_sim (no cluster, no judge)
 export TTRL_TASK_TYPE=open_ended_video
-export TTRL_OE_ENCODER=qwen3            # Qwen3-Embedding-4B, GPU bf16
-export QWEN3_EMBED_PATH=/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B
+# BGE-small chosen empirically: paraphrase pair 0.75, unrelated 0.03 (clean
+# discrimination). Qwen3-Embedding-4B was tested with various instruct
+# prefixes and gave paraphrase=0.23, unrelated=0.30 (broken for our use).
+export TTRL_OE_ENCODER=bge
+export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-small-en-v1.5
 export TTRL_OE_DEVICE=cuda
-export TTRL_OE_MAX_LEN=1024
+export TTRL_OE_MAX_LEN=512
 export TTRL_CG_ENABLE=0
+
+# Dedup identical rollouts before GRPO downsampling (avoids wasting samples
+# on duplicate text from temp=1.0 sampling on base models).
+export TTRL_DEDUP_SAMPLES=1
 
 # Train horizon
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-300}"
