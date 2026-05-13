@@ -35,10 +35,13 @@ export TTRL_OE_DEBUG=0
 # Reward path
 export TTRL_TASK_TYPE=simple_cluster
 export TTRL_CLUSTER_CONTINUOUS=1        # smooth [0,1] medoid reward
-export TTRL_OE_ENCODER=qwen3            # Qwen3-Embedding-4B, GPU bf16
-export QWEN3_EMBED_PATH=/data/sls/scratch/mvideet/models/Qwen3-Embedding-4B
+export TTRL_OE_ENCODER=bge              # apples-to-apples with 90015 (medoid)
+export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-small-en-v1.5
 export TTRL_OE_DEVICE=cuda
-export TTRL_OE_MAX_LEN=1024
+export TTRL_OE_MAX_LEN=512
+
+# Dedup duplicates before GRPO (same as 90015)
+export TTRL_DEDUP_SAMPLES=1
 export TTRL_CLUSTER_K_MIN=2
 export TTRL_CLUSTER_K_MAX=4
 export TTRL_CG_ENABLE=0
@@ -80,7 +83,7 @@ TASK="UltraFeedback-TTRL"
 BACKBONE="Qwen2.5-3B"
 ADVANTAGE="grpo"
 
-MAX_PROMPT_LENGTH=1024
+MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=1024
 DATA_TRAIN_BATCH_SIZE=8
 N_VOTES_PER_PROMPT=16
