@@ -172,7 +172,7 @@ python -m verl.trainer.main_ppo \
   trainer.save_freq=$SAVE_FREQ \
   trainer.test_freq=$TEST_FREQ \
   trainer.val_before_train=$VAL_BEFORE_TRAIN \
-  trainer.max_actor_ckpt_to_keep=3 \
+  trainer.max_actor_ckpt_to_keep=1 \
   trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
