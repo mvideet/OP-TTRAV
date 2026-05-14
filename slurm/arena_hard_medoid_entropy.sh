@@ -61,8 +61,8 @@ export TTRL_CG_ENABLE=0
 export TTRL_DEDUP_SAMPLES=1
 
 # Train horizon
-export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-300}"
-export SAVE_FREQ="${SAVE_FREQ:-300}"
+export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-600}"
+export SAVE_FREQ="${SAVE_FREQ:-600}"
 export TEST_FREQ=-1                     # offline eval only
 export VAL_BEFORE_TRAIN=false
 
