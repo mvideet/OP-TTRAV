@@ -61,6 +61,12 @@ from verl.utils.reward_score.ttrl_open_ended.embedding import (
 _DEBUG = os.environ.get("TTRL_DEBUG", "0") == "1"
 _OE_DEBUG = os.environ.get("TTRL_OE_DEBUG", "0") == "1"
 
+# Cross-step novelty bonus (EVOL-TTRL-style): running buffer of past cluster
+# anchor embeddings. Each step's new rollouts get a bonus for being far from
+# recent anchors → anti-mode-collapse without needing entropy regularization.
+from collections import deque
+_NOVELTY_BUFFER: deque = deque(maxlen=int(os.environ.get("TTRL_NOVELTY_BUFFER_SIZE", "100")))
+
 # Cluster hyperparameters (env-overridable).
 _K_MAX = int(os.environ.get("TTRL_CLUSTER_K_MAX", "4"))
 _K_MIN = int(os.environ.get("TTRL_CLUSTER_K_MIN", "2"))
@@ -337,12 +343,31 @@ def _simple_cluster_vote(
 
     in_modal = labels == modal
 
-    # Reward shape. Default = binary (1.0 in modal cluster, 0.0 else).
-    # If TTRL_CLUSTER_CONTINUOUS=1, use continuous cosine-sim-to-medoid mapped
-    # to [0, 1]: r = (cos(emb, anchor_emb) + 1) / 2. Restores gradient slope
-    # between "almost in modal" and "far from modal" — useful when modal_frac
-    # is high and binary reward collapses GRPO advantage to ~0.
-    if os.environ.get("TTRL_CLUSTER_CONTINUOUS", "0") == "1":
+    # Reward shape. Three modes (env-var gated):
+    #   TTRL_CLUSTER_KDE=1         -> KDE density at each rollout's embedding
+    #   TTRL_CLUSTER_CONTINUOUS=1  -> continuous cosine-sim-to-anchor in [0,1]
+    #   default (neither)          -> binary {0, 1} in/out of modal cluster
+    if os.environ.get("TTRL_CLUSTER_KDE", "0") == "1":
+        # KDE density reward. For each rollout i:
+        #   r_i = (1/(m-1)) * sum_{j != i} exp((cos(e_i, e_j) - 1) / tau)
+        # Then normalize so max(r) = 1.
+        # Key property: in-between rollouts sitting at saddle between two
+        # clusters get LOW density (their nearest neighbors in both clusters
+        # are still somewhat far). Solves the medoid pathology where in-betweens
+        # incorrectly get high reward from average closeness.
+        tau = float(os.environ.get("TTRL_CLUSTER_KDE_TAU", "0.2"))
+        E_norms = np.linalg.norm(E, axis=1, keepdims=True) + 1e-12
+        E_unit = E / E_norms
+        sim_matrix = E_unit @ E_unit.T  # (m, m), cosines in [-1, 1]
+        kernel = np.exp((sim_matrix - 1.0) / tau)  # 1 at self, decays away
+        np.fill_diagonal(kernel, 0.0)
+        if m > 1:
+            kde_density = kernel.sum(axis=1) / (m - 1)
+        else:
+            kde_density = np.ones(m)
+        peak = kde_density.max()
+        rewards_valid = kde_density / peak if peak > 0 else np.zeros(m)
+    elif os.environ.get("TTRL_CLUSTER_CONTINUOUS", "0") == "1":
         anchor_emb = E[anchor_local]
         anchor_emb_norm = anchor_emb / (np.linalg.norm(anchor_emb) + 1e-12)
         E_norms = np.linalg.norm(E, axis=1, keepdims=True) + 1e-12
@@ -351,6 +376,22 @@ def _simple_cluster_vote(
         rewards_valid = (sims_to_anchor + 1.0) / 2.0  # in [0, 1]
     else:
         rewards_valid = in_modal.astype(float)
+
+    # EVOL-TTRL novelty bonus: reward for being far from recent cluster anchors.
+    # Acts as anti-mode-collapse pressure without entropy regularization.
+    # Gated by TTRL_NOVELTY_BETA > 0.
+    nov_beta = float(os.environ.get("TTRL_NOVELTY_BETA", "0.0"))
+    if nov_beta > 0 and len(_NOVELTY_BUFFER) > 0:
+        E_norms = np.linalg.norm(E, axis=1, keepdims=True) + 1e-12
+        E_unit = E / E_norms
+        buf = np.stack(list(_NOVELTY_BUFFER))  # (B, d)
+        buf = buf / (np.linalg.norm(buf, axis=1, keepdims=True) + 1e-12)
+        sims_to_buf = E_unit @ buf.T  # (m, B)
+        max_sim = sims_to_buf.max(axis=1)  # (m,) — peak similarity to any past anchor
+        novelty = np.clip(1.0 - max_sim, 0.0, 1.0)  # high = far from buffer = novel
+        rewards_valid = np.clip(rewards_valid + nov_beta * novelty, 0.0, 1.0)
+    # Always push this step's anchor embedding into the buffer for next step.
+    _NOVELTY_BUFFER.append(E[anchor_local].copy())
 
     per_rollout_rewards = [0.0] * n
     for local_i, orig_i in enumerate(valid_idx):
