@@ -159,8 +159,6 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
   actor_rollout_ref.rollout.val_kwargs.do_sample=true \
   actor_rollout_ref.rollout.val_kwargs.n=1 \
-  data.max_response_length=1024 \
-  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=11024 \
   actor_rollout_ref.actor.clip_ratio_low=0.20 \
   actor_rollout_ref.actor.clip_ratio_high=0.20 \
   actor_rollout_ref.actor.entropy_coeff=0.0 \
