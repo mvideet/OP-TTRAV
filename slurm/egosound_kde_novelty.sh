@@ -132,7 +132,8 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   data.video_file_key=video_file \
   +data.audio_file_key=audio_file \
   data.filter_overlong_prompts=True \
-  data.max_prompt_length=12000 \
+  data.max_prompt_length=20000 \
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=21024 \
   trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
   trainer.save_freq=$SAVE_FREQ \
   trainer.test_freq=$TEST_FREQ \
