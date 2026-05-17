@@ -77,8 +77,10 @@ export VAL_N=1
 export VAL_TEMPERATURE=0.6
 export VAL_TOP_P=0.95
 
-export VIDEO_FPS=0.5
+export VIDEO_FPS=0.25                    # halved from 0.5 (EgoSound clips can be 60-120s; 0.5 fps → >30K tokens)
+export VIDEO_MAX_FRAMES=16               # cap (was default 32); each frame ~640 multimodal tokens
 export AUDIO_SAMPLE_RATE=8000
+export MAX_AUDIO_DURATION=30.0           # clip audio at 30s
 
 # vLLM rollout: V0 engine + clear expandable_segments (cumem allocator
 # incompatibilities surface in V1 + FSDP coexistence).
@@ -129,6 +131,8 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   data.answer_key=answer \
   data.video_file_key=video_file \
   +data.audio_file_key=audio_file \
+  data.filter_overlong_prompts=True \
+  data.max_prompt_length=12000 \
   trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
   trainer.save_freq=$SAVE_FREQ \
   trainer.test_freq=$TEST_FREQ \
