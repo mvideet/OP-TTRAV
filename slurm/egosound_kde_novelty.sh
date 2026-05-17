@@ -133,7 +133,11 @@ bash verl/examples/ttrl/Qwen2.5-Omni/daily_omni_judge.sh \
   +data.audio_file_key=audio_file \
   data.filter_overlong_prompts=True \
   data.max_prompt_length=20000 \
+  data.max_response_length=1024 \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu=21024 \
+  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=21024 \
+  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=21024 \
+  critic.ppo_max_token_len_per_gpu=21024 \
   trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
   trainer.save_freq=$SAVE_FREQ \
   trainer.test_freq=$TEST_FREQ \
