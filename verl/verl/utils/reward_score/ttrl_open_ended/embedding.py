@@ -107,7 +107,7 @@ def _load_model():
             kwargs = {"torch_dtype": dtype}
         else:
             paths = _DEFAULT_MODEL_PATHS
-            label = "BGE-small"
+            label = "BGE"
             default_device = "cpu"
             kwargs = {}
 

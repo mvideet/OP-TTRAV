@@ -36,7 +36,7 @@ export TTRL_OE_DEBUG=0
 export TTRL_TASK_TYPE=simple_cluster
 export TTRL_CLUSTER_CONTINUOUS=1        # smooth [0,1] medoid reward
 export TTRL_OE_ENCODER=bge              # apples-to-apples with 90015 (medoid)
-export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-small-en-v1.5
+export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-large-en-v1.5
 export TTRL_OE_DEVICE=cuda
 export TTRL_OE_MAX_LEN=512
 
@@ -150,7 +150,7 @@ python -m verl.trainer.main_ppo \
   critic.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   critic.model.fsdp_config.param_offload=True \
   critic.model.fsdp_config.optimizer_offload=True \
-  algorithm.kl_ctrl.kl_coef=0.00 \
+  algorithm.kl_ctrl.kl_coef=0.02 \
   algorithm.adv_estimator=$ADVANTAGE \
   custom_reward_function.path="./verl/verl/utils/reward_score/ttrl_judge/__init__.py" \
   custom_reward_function.name=reward_func \

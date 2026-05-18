@@ -45,7 +45,7 @@ export OMNI_INPUT_LOG_MAX_Q_CHARS=400
 # Switched from qwen3 (broken for paraphrase sim) to bge encoder.
 export TTRL_TASK_TYPE=simple_cluster
 export TTRL_OE_ENCODER=bge
-export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-small-en-v1.5
+export BGE_MODEL_PATH=/data/sls/scratch/mvideet/models/bge-large-en-v1.5
 export TTRL_OE_DEVICE=cuda
 export TTRL_OE_MAX_LEN=512
 
